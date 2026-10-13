@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+build/
+dist/
+# автоматически создаваемый PyInstaller-файл спецификации не сохраняем,
+# используется только рукописный ImageBatchStudio.spec
+/ImageBatchStudio.spec.bak
+docs/_build/
+preview/
