@@ -1,0 +1,7 @@
+Pillow>=10.0
+# Необязательные кодеки для HEIC/AVIF:
+# pip install pillow-heif pillow-avif-plugin
+tkinterdnd2>=0.3.0
+pytest>=8.0
+black>=24.0
+flake8>=7.0
