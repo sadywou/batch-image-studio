@@ -74,7 +74,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="ImageBatchStudio",
+    # Имя файла задано техническим заданием (разделы 1.7 и 7).
+    name="BatchImageStudio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

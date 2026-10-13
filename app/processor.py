@@ -2,14 +2,39 @@
 from pathlib import Path
 from typing import Callable, Optional
 
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import (Image, ImageDraw, ImageFont, ImageOps,
+                 UnidentifiedImageError)
 
-from .models import Preset
+from .models import (RESIZE_MODES, WATERMARK_POSITIONS, WATERMARK_TYPES,
+                     Preset)
 
 ProgressCallback = Callable[[int], None]
 
 # Форматы, в которые Pillow умеет записать блок EXIF без потери остальных данных.
 EXIF_CAPABLE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "TIFF", "HEIF", "AVIF"})
+
+
+def _to_int(value: str, label: str) -> int:
+    """Преобразует строку в положительное целое число с понятной ошибкой."""
+    try:
+        number = int(float(str(value).strip()))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            f"Значение «{label}» должно быть целым числом, получено «{value}»"
+        ) from exc
+    if number <= 0:
+        raise ValueError(f"Значение «{label}» должно быть положительным числом")
+    return number
+
+
+def _to_float(value: str, label: str) -> float:
+    """Преобразует строку в число с понятной ошибкой."""
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            f"Значение «{label}» должно быть числом, получено «{value}»"
+        ) from exc
 
 
 class ImageProcessor:
@@ -105,7 +130,7 @@ class ImageProcessor:
         report(35)
         image = self._resize(image, preset)
         report(60)
-        if preset.watermark_enabled and preset.watermark_text.strip():
+        if preset.watermark_enabled and self._watermark_content(preset):
             image = self._apply_watermark(image, preset)
         report(75)
         if preset.clear_exif:
@@ -141,16 +166,45 @@ class ImageProcessor:
 
     @staticmethod
     def _validate_preset(preset: Preset) -> None:
-        """Проверяет диапазоны параметров до начала обработки."""
-        for label, value in (("ширина", preset.width), ("высота", preset.height)):
-            if value is not None and (isinstance(value, bool) or value <= 0):
-                raise ValueError(f"Значение «{label}» должно быть положительным целым числом")
-        if preset.width is None and preset.height is None:
-            pass
+        """Проверяет диапазоны параметров до начала обработки.
+
+        Args:
+            preset: Профиль настроек обработки.
+
+        Raises:
+            ValueError: Любой из параметров выходит за допустимый диапазон.
+        """
+        if preset.resize_mode not in RESIZE_MODES:
+            raise ValueError(
+                f"Неизвестный режим масштабирования: {preset.resize_mode}")
+        if preset.resize_mode != "NONE":
+            value = (preset.resize_value or "").strip()
+            if not value:
+                raise ValueError("Укажите значение размера для выбранного режима")
+            if preset.resize_mode == "PERCENT":
+                if not 0 < _to_float(value, "процент") <= 1000:
+                    raise ValueError(
+                        "Процент изменения размера должен быть больше 0")
+            elif preset.resize_mode == "FIT":
+                parts = value.lower().replace("х", "x").split("x", 1)
+                if len(parts) != 2:
+                    raise ValueError(
+                        "Габаритный прямоугольник задаётся в виде «ширина×высота»")
+                _to_int(parts[0], "ширина габарита")
+                _to_int(parts[1], "высота габарита")
+            else:
+                _to_int(value, "размер изображения")
         if not 1 <= preset.quality <= 100:
             raise ValueError("Качество должно быть в диапазоне от 1 до 100")
         if not 0 <= preset.watermark_opacity <= 100:
             raise ValueError("Непрозрачность водяного знака должна быть от 0 до 100")
+        if not 1 <= preset.watermark_size <= 20:
+            raise ValueError("Размер водяного знака должен быть от 1 до 20 процентов")
+        if preset.watermark_type not in WATERMARK_TYPES:
+            raise ValueError(f"Неизвестный тип водяного знака: {preset.watermark_type}")
+        if preset.watermark_position not in WATERMARK_POSITIONS:
+            raise ValueError(
+                f"Неизвестная позиция водяного знака: {preset.watermark_position}")
 
     @staticmethod
     def _load_optional_codec(output_format: str) -> None:
@@ -181,44 +235,236 @@ class ImageProcessor:
         return candidate
 
     @staticmethod
-    def _resize(image: Image.Image, preset: Preset) -> Image.Image:
-        """Изменяет размер, сохраняя пропорции при включённой опции."""
-        if preset.width is None and preset.height is None:
+    def _target_size(image: Image.Image, preset: Preset) -> tuple:
+        """Вычисляет размер изображения по режиму масштабирования из ТЗ.
+
+        Поддерживаются пять режимов, требуемых техническим заданием:
+        масштабирование по фиксированной ширине, по фиксированной высоте,
+        вписывание в габаритный прямоугольник, процентное изменение
+        и отказ от изменения размера.
+
+        Args:
+            image: Исходное изображение.
+            preset: Профиль настроек обработки.
+
+        Returns:
+            Пара ``(ширина, высота)`` в пикселях.
+
+        Raises:
+            ValueError: Режим неизвестен или значение некорректно.
+        """
+        mode = preset.resize_mode
+        value = (preset.resize_value or "").strip()
+
+        if mode == "NONE":
+            return image.size
+
+        if mode == "PERCENT":
+            percent = _to_float(value, "процент изменения размера")
+            if not 0 < percent <= 1000:
+                raise ValueError("Процент изменения размера должен быть больше 0")
+            return (max(1, round(image.width * percent / 100)),
+                    max(1, round(image.height * percent / 100)))
+
+        if mode == "FIT":
+            if "x" not in value.lower().replace("х", "x"):
+                raise ValueError(
+                    "Габаритный прямоугольник задаётся в виде «ширина×высота»")
+            parts = value.lower().replace("х", "x").split("x", 1)
+            box_w = _to_int(parts[0], "ширина габарита")
+            box_h = _to_int(parts[1], "высота габарита")
+            return ImageOps.contain(image, (box_w, box_h),
+                                    method=Image.Resampling.LANCZOS).size
+
+        number = _to_int(value, "размер")
+        if mode == "WIDTH":
+            if not 1 <= number <= 20000:
+                raise ValueError("Ширина должна быть от 1 до 20000 пикселей")
+            ratio = number / image.width
+            height = round(image.height * ratio)
+            if preset.keep_ratio:
+                return number, max(1, height)
+            return number, number
+
+        if mode == "HEIGHT":
+            if not 1 <= number <= 20000:
+                raise ValueError("Высота должна быть от 1 до 20000 пикселей")
+            ratio = number / image.height
+            width = round(image.width * ratio)
+            if preset.keep_ratio:
+                return max(1, width), number
+            return number, number
+
+        raise ValueError(f"Неизвестный режим масштабирования: {mode}")
+
+    @classmethod
+    def _resize(cls, image: Image.Image, preset: Preset) -> Image.Image:
+        """Изменяет размер по выбранному режиму с интерполяцией LANCZOS."""
+        width, height = cls._target_size(image, preset)
+        if (width, height) == image.size:
             return image.copy()
-        width = preset.width or image.width
-        height = preset.height or image.height
-        if preset.keep_ratio:
-            ratio = min(width / image.width, height / image.height)
-            width = max(1, round(image.width * ratio))
-            height = max(1, round(image.height * ratio))
         return image.resize((width, height), Image.Resampling.LANCZOS)
 
     @staticmethod
-    def _apply_watermark(image: Image.Image, preset: Preset) -> Image.Image:
-        """Накладывает текстовый водяной знак с заданной позицией и прозрачностью."""
+    def _watermark_anchor(position: str, item_w: int, item_h: int,
+                          canvas_w: int, canvas_h: int, margin: int) -> tuple:
+        """Вычисляет координаты знака для одной из девяти позиций сетки 3×3.
+
+        Args:
+            position: Код позиции, например ``top-center``.
+            item_w: Ширина накладываемого элемента.
+            item_h: Высота накладываемого элемента.
+            canvas_w: Ширина изображения-подложки.
+            canvas_h: Высота изображения-подложки.
+            margin: Отступ от края изображения.
+
+        Returns:
+            Координаты левого верхнего угла элемента.
+        """
+        def left(free: int) -> int:
+            return max(margin, (free - item_w) // 2)
+
+        def right(free: int) -> int:
+            return max(margin, free - item_w - margin)
+
+        def middle(free: int) -> int:
+            return max(margin, (free - item_h) // 2)
+
+        def bottom(free: int) -> int:
+            return max(margin, free - item_h - margin)
+
+        columns = {"left": lambda free: margin, "center": left, "right": right}
+        rows = {"top": lambda free: margin, "center": middle, "middle": middle,
+                "bottom": bottom}
+        # Первая часть кода — положение по вертикали, вторая — по горизонтали:
+        # «top-center» читается как верх и центр по горизонтали.
+        # Позиция «center» без дефиса означает середину по обеим осям.
+        parts = (position or "bottom-right").split("-", 1)
+        if len(parts) == 2:
+            row = parts[0] if parts[0] in rows else "bottom"
+            column = parts[1] if parts[1] in columns else "right"
+        else:
+            row = column = "center" if parts[0] == "center" else None
+            if row is None:
+                row, column = "bottom", "right"
+        return columns[column](canvas_w), rows[row](canvas_h)
+
+    @classmethod
+    def _apply_watermark(cls, image: Image.Image, preset: Preset) -> Image.Image:
+        """Наносит текстовый или графический водяной знак.
+
+        Графический знак берётся из PNG-файла с альфа-каналом и масштабируется
+        относительно меньшей стороны изображения. Текстовый знак рисуется
+        с заданным размером и цветом.
+
+        Args:
+            image: Обрабатываемое изображение.
+            preset: Профиль настроек обработки.
+
+        Returns:
+            Изображение с наложенным знаком.
+
+        Raises:
+            RuntimeError: Графический знак недоступен или повреждён.
+        """
         base = image.convert("RGBA")
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        font_size = max(12, min(48, round(min(base.size) * 0.04)))
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except OSError:
-            font = ImageFont.load_default()
+        alpha = round(255 * preset.watermark_opacity / 100)
+        margin = cls._margin(base)
+
+        if preset.watermark_type == "IMAGE" and preset.watermark_image.strip():
+            mark = cls._load_logo(preset, base)
+            x, y = cls._watermark_anchor(preset.watermark_position, mark.width,
+                                         mark.height, base.width, base.height, margin)
+            overlay.alpha_composite(mark, (x, y))
+            return Image.alpha_composite(base, overlay)
+
         text = preset.watermark_text.strip()
+        if not text:
+            return base
+
+        draw = ImageDraw.Draw(overlay)
+        size_ratio = max(1, min(20, preset.watermark_size)) / 100
+        font_size = max(10, min(400, round(min(base.size) * size_ratio)))
+        font = cls._load_font(font_size)
         bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
         text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        margin = max(8, round(min(base.size) * 0.02))
-        positions = {
-            "bottom-right": (base.width - text_w - margin, base.height - text_h - margin),
-            "top-right": (base.width - text_w - margin, margin),
-            "bottom-left": (margin, base.height - text_h - margin),
-            "top-left": (margin, margin),
-        }
-        x, y = positions.get(preset.watermark_position, positions["bottom-right"])
-        alpha = round(255 * preset.watermark_opacity / 100)
-        draw.text((x, y), text, font=font, fill=(255, 255, 255, alpha),
-                  stroke_width=1, stroke_fill=(0, 0, 0, alpha))
+        x, y = cls._watermark_anchor(preset.watermark_position, text_w, text_h,
+                                     base.width, base.height, margin)
+        fill = cls._parse_color(preset.watermark_color, alpha)
+        outline = ((255, 255, 255, alpha) if fill[:3] == (0, 0, 0)
+                   else (0, 0, 0, alpha))
+        draw.text((x, y), text, font=font, fill=fill,
+                  stroke_width=max(1, font_size // 18), stroke_fill=outline)
         return Image.alpha_composite(base, overlay)
+
+    @staticmethod
+    def _watermark_content(preset: Preset) -> str:
+        """Возвращает содержимое знака: текст или путь к файлу логотипа."""
+        if preset.watermark_type == "IMAGE":
+            return preset.watermark_image.strip()
+        return preset.watermark_text.strip()
+
+    @staticmethod
+    def _margin(image: Image.Image) -> int:
+        """Отступ водяного знака от края изображения."""
+        return max(6, round(min(image.size) * 0.02))
+
+    @staticmethod
+    def _load_font(font_size: int):
+        """Загружает шрифт Arial, при его отсутствии — стандартный шрифт Pillow."""
+        for name in ("segoeuib.ttf", "arialbd.ttf", "arial.ttf",
+                     "DejaVuSans-Bold.ttf"):
+            try:
+                return ImageFont.truetype(name, font_size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _parse_color(value: str, alpha: int) -> tuple:
+        """Преобразует HEX-цвет в кортеж RGBA с заданной прозрачностью."""
+        text = (value or "").strip().lstrip("#")
+        if len(text) != 6:
+            return (255, 255, 255, alpha)
+        try:
+            red, green, blue = (int(text[index:index + 2], 16)
+                                for index in (0, 2, 4))
+        except ValueError:
+            return (255, 255, 255, alpha)
+        return (red, green, blue, alpha)
+
+    @classmethod
+    def _load_logo(cls, preset: Preset, canvas: Image.Image) -> Image.Image:
+        """Загружает графический водяной знак и масштабирует его под изображение.
+
+        Логотип вписывается в треть меньшей стороны результата, чтобы
+        не перекрывать основное содержимое фотографии.
+
+        Args:
+            preset: Профиль с путём к файлу знака.
+            canvas: Изображение, на которое наносится знак.
+
+        Returns:
+            Изображение знака в режиме RGBA.
+
+        Raises:
+            RuntimeError: Файл знака не найден или не является изображением.
+        """
+        path = Path(preset.watermark_image.strip())
+        if not path.is_file():
+            raise RuntimeError(f"Файл водяного знака не найден: {path}")
+        try:
+            with Image.open(path) as opened:
+                logo = opened.convert("RGBA")
+        except (UnidentifiedImageError, OSError) as exc:
+            raise RuntimeError(
+                f"Не удалось загрузить водяной знак {path.name}: "
+                "ожидается файл изображения с прозрачностью (PNG)"
+            ) from exc
+        target = max(8, round(min(canvas.size) * 0.25))
+        return ImageOps.contain(logo, (target, target),
+                                method=Image.Resampling.LANCZOS)
 
     @classmethod
     def _prepare_ico(cls, image: Image.Image) -> Image.Image:

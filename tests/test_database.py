@@ -20,13 +20,14 @@ def db(tmp_path: Path):
 
 
 def test_preset_watermark_roundtrip(db: DatabaseManager) -> None:
-    preset = Preset(name="demo", output_format="PNG", width=640,
+    preset = Preset(name="demo", output_format="PNG", resize_mode="WIDTH",
+                    resize_value="640",
                     watermark_enabled=True, watermark_text="Sample",
                     watermark_position="top-left", watermark_opacity=55)
     db.create_preset(preset)
     loaded = db.get_preset("demo")
     assert loaded is not None
-    assert loaded.width == 640
+    assert loaded.resize_value == "640"
     assert loaded.watermark_enabled is True
     assert loaded.watermark_text == "Sample"
     assert loaded.watermark_position == "top-left"
@@ -96,8 +97,8 @@ def test_watermark_upsert_replaces_values(db: DatabaseManager) -> None:
     db.save_watermark("wm", "Первый", opacity=40, position="top-left", enabled=True)
     db.save_watermark("wm", "Второй", opacity=90, position="bottom-left")
     saved = db.get_watermark("wm")
-    assert saved["text"] == "Второй"
-    assert saved["opacity"] == 90
+    assert saved["content"] == "Второй"
+    assert saved["opacity"] == 0.9
     assert saved["position"] == "bottom-left"
     rows = db.connection.execute("SELECT COUNT(*) FROM tbl_watermarks").fetchone()[0]
     assert rows == 1
@@ -153,7 +154,7 @@ def test_session_file_history(db: DatabaseManager, tmp_path: Path) -> None:
     item = QueueItem(source=source, status="Ошибка", error="sample error")
     db.log_processed_file(session_id, item)
     db.finish_session(session_id, 0.25, [item])
-    assert db.list_processed_files(session_id)[0][5:] == ("Ошибка", "sample error")
+    assert db.list_processed_files(session_id)[0][5:] == ("ERROR", "sample error")
     session = db.list_sessions()[0]
     assert session[4:7] == (1, 0, 1)
     db.delete_session(session_id)
@@ -224,7 +225,7 @@ def test_log_processed_file_uses_zero_for_missing_source(
     session_id = db.create_session(Preset(name="nofile"), 1)
     db.log_processed_file(session_id, QueueItem(source=tmp_path / "missing.png"))
     row = db.list_processed_files(session_id)[0]
-    assert row[3] == 0 and row[4] == 0 and row[5] == "В очереди"
+    assert row[3] == 0 and row[4] == 0 and row[5] == "ERROR"
 
 
 def test_list_sessions_limit_is_clamped(db: DatabaseManager) -> None:

@@ -7,7 +7,7 @@
 #    2. устанавливаются зависимости и PyInstaller;
 #    3. прогоняются автотесты и статический анализ;
 #    4. создаётся иконка;
-#    5. собирается один файл dist/ImageBatchStudio.
+#    5. собирается один файл dist/BatchImageStudio.
 # ==========================================================================
 set -eu
 cd "$(dirname "$0")"
@@ -34,17 +34,17 @@ echo "[4/5] Создание иконки приложения"
 "$PY" tools/make_icon.py
 
 echo "[5/5] Сборка исполняемого файла"
-rm -rf build/ImageBatchStudio dist/ImageBatchStudio dist/ImageBatchStudio.spec.bak 2>/dev/null || true
+rm -rf build/ImageBatchStudio dist/BatchImageStudio dist/BatchImageStudio.spec.bak 2>/dev/null || true
 "$PY" -m PyInstaller ImageBatchStudio.spec --noconfirm --clean --log-level WARN
 
-test -f dist/ImageBatchStudio || {
+test -f dist/BatchImageStudio || {
     echo "!!! Исполняемый файл не создан" >&2
     exit 1
 }
 
 echo
 echo "=========================================================================="
-echo " Готово: dist/ImageBatchStudio"
-ls -lh dist/ImageBatchStudio
-echo " Запуск: dist/ImageBatchStudio"
+echo " Готово: dist/BatchImageStudio"
+ls -lh dist/BatchImageStudio
+echo " Запуск: dist/BatchImageStudio"
 echo "=========================================================================="

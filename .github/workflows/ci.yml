@@ -70,11 +70,11 @@ jobs:
         run: pytest -q
 
       - name: Собрать исполняемый файл
-        run: pyinstaller ImageBatchStudio.spec --noconfirm --clean
+        run: pyinstaller BatchImageStudio.spec --noconfirm --clean
 
-      - name: Приложить ImageBatchStudio.exe
+      - name: Приложить BatchImageStudio.exe
         uses: actions/upload-artifact@v4
         with:
-          name: ImageBatchStudio-windows
-          path: dist/ImageBatchStudio.exe
+          name: BatchImageStudio-windows
+          path: dist/BatchImageStudio.exe
           if-no-files-found: error

@@ -1,6 +1,6 @@
 """Проверка готового .exe: запуск, создание базы и снимок экрана.
 
-Скрипт запускает dist\\ImageBatchStudio.exe как обычный пользовательский процесс,
+Скрипт запускает dist\\BatchImageStudio.exe как обычный пользовательский процесс,
 делает снимок окна и проверяет, что рабочая база создалась рядом с файлом.
 
 Запуск:  python tools/check_exe.py
@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "dist" / "ImageBatchStudio.exe"
+EXE = ROOT / "dist" / "BatchImageStudio.exe"
 SHOTS = ROOT / "docs" / "screenshots"
 
 

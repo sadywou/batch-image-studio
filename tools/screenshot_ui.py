@@ -156,7 +156,7 @@ def main() -> None:
 
     preset = window._build_preset()
     print(f"профиль после обработки: {preset.name} -> {preset.output_format} "
-          f"{preset.width}x{preset.height}")
+          f"{preset.resize_mode} {preset.resize_value}")
     sessions = window.database.list_sessions()
     if sessions:
         session = sessions[0]

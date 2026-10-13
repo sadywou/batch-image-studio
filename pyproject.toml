@@ -1,5 +1,75 @@
+# Описание проекта в формате Poetry.
+# Управление зависимостями выполняется командами:
+#   poetry install           — установить всё, включая инструменты разработки;
+#   poetry install --only prod — только то, что нужно для запуска программы;
+#   poetry run python run_app.py — запуск программы в окружении проекта.
+# Техническое задание, раздел 4.3.4 и раздел 8.
+
+[project]
+name = "batch-image-studio"
+version = "1.0.0"
+description = "Студия пакетной обработки изображений (BatchImageStudio)"
+readme = "README.md"
+requires-python = ">=3.10,<3.16"
+license = "MIT"
+authors = [
+    { name = "Исмоилов Аслидин Шерзодович" },
+]
+keywords = ["изображения", "пакетная обработка", "конвертация", "Pillow", "Tkinter"]
+
+# Зависимости, необходимые для работы программы (раздел 4.3.4).
+dependencies = [
+    "Pillow (>=10.0)",
+    "tkinterdnd2 (>=0.3.0)",
+]
+
+# Кодеки HEIC и AVIF поставляются отдельными пакетами, потому что
+# они лицензируются не так, как остальные библиотеки Pillow.
+[project.optional-dependencies]
+# Расширенные форматы из технического задания: HEIC и AVIF.
+codecs = [
+    "pillow-heif (>=0.16.0)",
+    "pillow-avif-plugin (>=1.4.0)",
+]
+
+[project.urls]
+Homepage = "https://github.com/student-isp34/batch-image-studio"
+Documentation = "https://github.com/student-isp34/batch-image-studio/tree/main/docs"
+
+[project.scripts]
+# Команда запуска в окружении Poetry: poetry run batch-image-studio
+batch-image-studio = "app.main:main"
+
+# --------------------------------------------------------------- Poetry
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+# Инструменты разработки и контроля качества из раздела 8 ТЗ.
+pytest = ">=8.0"
+pytest-cov = ">=5.0"
+black = ">=24.0"
+flake8 = ">=7.0"
+pyinstaller = ">=6.0"
+sphinx = ">=7.0"
+
+# --------------------------------------------------- Форматирование и стиль
 [tool.black]
 line-length = 88
+target-version = ["py310"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

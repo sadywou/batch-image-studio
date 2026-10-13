@@ -60,7 +60,8 @@ def memory_stability(folder: Path, output: Path, batches: int = 6,
                      per_batch: int = 200) -> None:
     """Проверяет, что память не растёт линейно с числом обработанных файлов."""
     processor = ImageProcessor()
-    preset = Preset(name="stress", output_format="WebP", width=1280, height=720,
+    preset = Preset(name="stress", output_format="WebP",
+                    resize_mode="WIDTH", resize_value="1280",
                     quality=80, watermark_enabled=True, watermark_text="STUDIO",
                     output_dir=str(output))
     sources = sorted(folder.glob("*.jpg"))

@@ -118,21 +118,42 @@ def test_no_sql_is_built_with_plus_operator():
         f"Обнаружена конкатенация в SQL на строках {offenders}")
 
 
+#: Методы, в которых допустима интерполяция имён объектов.
+#: Каждый из них проверяет имена по белому списку SCHEMA_TABLES
+#: и регулярным выражениям, а пользовательский ввод в текст запроса
+#: не подставляется.
+MIGRATION_METHODS = ("_ensure_column", "_rename_column", "_migrate_legacy_schema")
+
+
 def test_only_schema_migration_uses_interpolated_sql():
-    """Вне _ensure_column текст SQL обязан быть строковым литералом."""
-    migration = _function_node("_ensure_column")
-    migration_lines = {node.lineno for node in ast.walk(migration)
-                       if isinstance(node, (ast.Call, ast.Assign, ast.AugAssign))}
+    """Вне методов миграции текст SQL обязан быть строковым литералом."""
+    migration_lines = set()
+    for name in MIGRATION_METHODS:
+        node = _function_node(name)
+        migration_lines.update(
+            getattr(child, "lineno", None) for child in ast.walk(node))
+    migration_lines.discard(None)
     offenders = []
     for name, node in _database_sql_nodes():
         sql_text = node.args[0] if node.args else None
         if sql_text is None or isinstance(sql_text, ast.Constant):
             continue
-        if node.lineno in migration_lines:
+        lineno = getattr(sql_text, "lineno", None)
+        if lineno is not None and lineno in migration_lines:
             continue
-        offenders.append((name, node.lineno))
+        offenders.append((name, lineno))
     assert not offenders, (
         f"Динамический SQL вне миграции: {offenders}")
+
+
+def test_migration_methods_validate_identifiers():
+    """Методы миграции обязаны проверять имена по белому списку."""
+    for name in ("_ensure_column", "_rename_column"):
+        body = ast.dump(_function_node(name))
+        assert "SCHEMA_TABLES" in body, (
+            f"{name} не сверяет имя таблицы с белым списком")
+        assert "IDENTIFIER_PATTERN" in body, (
+            f"{name} не проверяет имя столбца регулярным выражением")
 
 
 def test_schema_migration_rejects_unknown_table():

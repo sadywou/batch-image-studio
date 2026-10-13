@@ -46,14 +46,14 @@ Python и дополнительные библиотеки устанавлив
 
 **3.1. Загрузка и запуск**
 
-1. Скопируйте ``ImageBatchStudio.exe`` в папку, например ``C:\ImageBatchStudio``.
+1. Скопируйте ``BatchImageStudio.exe`` в папку, например ``C:\BatchImageStudio``.
 2. Дважды щёлкните по файлу.
 
 .. important::
 
    Не запускайте программу из папки ``C:\Program Files``: у вас нет прав
    на запись в неё. Программа в этом случае сама переносит базу в
-   ``%LOCALAPPDATA%\ImageBatchStudio``.
+   ``%LOCALAPPDATA%\BatchImageStudio``.
 
 **3.2. Управление выполнением**
 

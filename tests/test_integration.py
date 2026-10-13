@@ -50,8 +50,8 @@ def run_worker(items, preset, processor, timeout=30.0):
 
 def test_worker_processes_whole_queue(tmp_path: Path) -> None:
     items = make_queue(tmp_path, 3)
-    preset = Preset(name="w", output_format="JPG", width=30, height=30,
-                    output_dir=str(tmp_path / "out"))
+    preset = Preset(name="w", output_format="JPG", resize_mode="FIT",
+                    resize_value="30x30", output_dir=str(tmp_path / "out"))
     events, finished = run_worker(items, preset, ImageProcessor())
 
     assert [item.status for item in items] == ["Готово"] * 3
@@ -149,8 +149,9 @@ def test_full_pipeline_ui_preset_to_journal(tmp_path: Path) -> None:
     processor = ImageProcessor()
 
     # 1. Пользователь настроил профиль и сохранил его через форму.
-    form_preset = Preset(name="Для сайта", output_format="WebP", width=120,
-                        height=90, quality=70, clear_exif=True, keep_ratio=True,
+    form_preset = Preset(name="Для сайта", output_format="WebP",
+                         resize_mode="FIT", resize_value="120x90",
+                         quality=70, clear_exif=True, keep_ratio=True,
                         output_dir=str(tmp_path / "out"),
                         watermark_enabled=True, watermark_text="STUDIO",
                         watermark_position="bottom-right", watermark_opacity=80)
@@ -159,7 +160,7 @@ def test_full_pipeline_ui_preset_to_journal(tmp_path: Path) -> None:
     # 2. Окно перечитало профиль из базы перед запуском.
     loaded = database.get_preset("Для сайта")
     assert loaded is not None and loaded.output_format == "WebP"
-    assert loaded.width == 120 and loaded.quality == 70
+    assert loaded.resize_value == "120x90" and loaded.quality == 70
 
     # 3. Пользователь добавил файлы и запустил обработку.
     items = make_queue(tmp_path, 3)
@@ -174,7 +175,7 @@ def test_full_pipeline_ui_preset_to_journal(tmp_path: Path) -> None:
     rows = database.list_processed_files(session_id)
     # Колонки: id, source_path, output_path, size_before, size_after, status, error
     assert len(rows) == 3
-    assert all(row[5] == "Готово" for row in rows)
+    assert all(row[5] == "SUCCESS" for row in rows)
     assert all(row[3] > 0 for row in rows)          # размер исходника записан
     assert all(row[4] > 0 for row in rows)          # размер результата записан
     assert all(Path(row[2]).exists() for row in rows)  # результат лежит на диске

@@ -16,7 +16,7 @@
 ### Готовый исполняемый файл
 
 ```bat
-dist\ImageBatchStudio.exe
+dist\BatchImageStudio.exe
 ```
 
 Python и зависимости установлять не требуется.
@@ -47,7 +47,7 @@ build_windows.bat
 
 Скрипт последовательно выполняет пять шагов: создаёт виртуальное окружение,
 устанавливает зависимости, прогоняет `flake8` и `pytest`, создаёт иконку
-и собирает один файл `dist\ImageBatchStudio.exe` (~33 МБ).
+и собирает один файл `dist\BatchImageStudio.exe` (~33 МБ).
 
 Для Linux/macOS — `sh build_linux.sh` (собирается файл `dist/ImageBatchStudio`).
 

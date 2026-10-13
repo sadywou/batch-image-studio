@@ -24,10 +24,12 @@
    .venv\Scripts\activate          # Windows
    source .venv/bin/activate       # Linux/macOS
    python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt
-   python -m pip install pytest pytest-cov flake8 psutil pyinstaller
+   poetry install
 
-Зависимости зафиксированы в ``requirements.txt``:
+Полная версия этой инструкции — в файле ``INSTALL_POETRY.md``
+в корне репозитория.
+
+Зависимости зафиксированы в ``pyproject.toml`` и ``poetry.lock``:
 
 ============================  ==============================================
 Пакет                         Назначение
@@ -177,7 +179,7 @@ flake8                        Статический анализ
 .. code-block:: bash
 
    python tools/make_icon.py
-   pyinstaller ImageBatchStudio.spec --noconfirm --clean
+   pyinstaller BatchImageStudio.spec --noconfirm --clean
 
 Проверка результата:
 
@@ -186,7 +188,7 @@ flake8                        Статический анализ
    python tools/check_exe.py      # запуск и создание базы
    python tools/screenshot_exe.py # снимок окна собранного файла
 
-Результат: ``dist/ImageBatchStudio.exe`` размером около 34 МБ.
+Результат: ``dist/BatchImageStudio.exe`` размером около 34 МБ.
 
 .. important::
 
@@ -253,7 +255,7 @@ Google Style (Args, Returns, Raises) и пересобрать документ�
 * Анимированные изображения обрабатываются как первый кадр.
 * Для ICO создаётся один файл с тремя размерами; увеличение исходника
   не создаётся.
-* Текстовый водяной знак поддерживает четыре положения; логотип-файл
+* Водяной знак поддерживает девять положений, текстовый и графический варианты; логотип-файл выбирается кнопкой рядом с полем ввода
   в интерфейсе пока не выбирается.
 * Drag-and-Drop зависит от ``tkinterdnd2`` и оконного окружения.
 * Тесты интерфейса требуют графического окружения: на сервере без дисплея

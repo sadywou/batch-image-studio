@@ -20,8 +20,9 @@ def make_image(path: Path, size=(100, 50), color="white", mode="RGB") -> Path:
 
 def test_resize_and_convert(tmp_path: Path) -> None:
     source = make_image(tmp_path / "source.png")
-    preset = Preset(name="test", output_format="JPG", width=50, height=50,
-                    quality=80, output_dir=str(tmp_path / "out"))
+    preset = Preset(name="test", output_format="JPG", resize_mode="FIT",
+                    resize_value="50x50", quality=80,
+                    output_dir=str(tmp_path / "out"))
     result = ImageProcessor().process(source, preset)
     assert result.exists()
     with Image.open(result) as image:
@@ -32,23 +33,25 @@ def test_resize_and_convert(tmp_path: Path) -> None:
 
 def test_keep_ratio_false_resizes_to_exact_size(tmp_path: Path) -> None:
     source = make_image(tmp_path / "source.png", (100, 50))
-    preset = Preset(name="stretch", output_format="PNG", width=80, height=80,
-                    keep_ratio=False, output_dir=str(tmp_path / "out"))
+    preset = Preset(name="stretch", output_format="PNG", resize_mode="WIDTH",
+                    resize_value="80", keep_ratio=False,
+                    output_dir=str(tmp_path / "out"))
     with Image.open(ImageProcessor().process(source, preset)) as image:
         assert image.size == (80, 80)
 
 
 def test_only_one_dimension_keeps_second_side(tmp_path: Path) -> None:
     source = make_image(tmp_path / "source.png", (400, 200))
-    preset = Preset(name="width-only", output_format="PNG", width=100,
-                    output_dir=str(tmp_path / "out"))
+    preset = Preset(name="width-only", output_format="PNG", resize_mode="WIDTH",
+                    resize_value="100", output_dir=str(tmp_path / "out"))
     with Image.open(ImageProcessor().process(source, preset)) as image:
         assert image.size == (100, 50)
 
 
 def test_no_dimensions_returns_identical_image(tmp_path: Path) -> None:
     source = make_image(tmp_path / "source.png", (64, 48))
-    preset = Preset(name="asis", output_format="PNG", output_dir=str(tmp_path / "out"))
+    preset = Preset(name="asis", output_format="PNG", resize_mode="NONE",
+                    resize_value="", output_dir=str(tmp_path / "out"))
     with Image.open(ImageProcessor().process(source, preset)) as image:
         assert image.size == (64, 48)
 
@@ -183,8 +186,8 @@ def test_animated_gif_uses_first_frame(tmp_path: Path) -> None:
                                  append_images=[Image.new("P", (16, 16), 1)], duration=100,
                                  loop=0)
     result = ImageProcessor().process(
-        source, Preset(name="anim", output_format="PNG",
-                       output_dir=str(tmp_path / "out")))
+        source, Preset(name="anim", output_format="PNG", resize_mode="NONE",
+                       resize_value="", output_dir=str(tmp_path / "out")))
     with Image.open(result) as image:
         assert image.size == (16, 16)
 
@@ -252,20 +255,29 @@ def test_unsupported_output_format_rejected(tmp_path: Path) -> None:
                            output_dir=str(tmp_path / "out")))
 
 
-@pytest.mark.parametrize("width,height", [(0, 10), (-5, 10), (10, 0), (10, -1)])
-def test_invalid_dimensions_rejected(tmp_path: Path, width: int, height: int) -> None:
+@pytest.mark.parametrize("value", ["0", "-5", "abc", ""])
+def test_invalid_dimensions_rejected(tmp_path: Path, value: str) -> None:
     source = make_image(tmp_path / "source.png", (10, 10))
-    with pytest.raises(ValueError, match="ширина|высота"):
+    with pytest.raises(ValueError):
         ImageProcessor().process(
-            source, Preset(name="bad", width=width, height=height,
+            source, Preset(name="bad", resize_mode="WIDTH", resize_value=value,
                            output_dir=str(tmp_path / "out")))
 
 
-def test_boolean_dimension_is_rejected(tmp_path: Path) -> None:
+def test_percent_mode_validation(tmp_path: Path) -> None:
     source = make_image(tmp_path / "source.png", (10, 10))
-    with pytest.raises(ValueError, match="ширина"):
+    with pytest.raises(ValueError, match="роцент"):
         ImageProcessor().process(
-            source, Preset(name="bool", width=True, output_dir=str(tmp_path / "out")))
+            source, Preset(name="pct", resize_mode="PERCENT", resize_value="-10",
+                           output_dir=str(tmp_path / "out")))
+
+
+def test_fit_mode_requires_two_numbers(tmp_path: Path) -> None:
+    source = make_image(tmp_path / "source.png", (10, 10))
+    with pytest.raises(ValueError, match="абарит"):
+        ImageProcessor().process(
+            source, Preset(name="fit", resize_mode="FIT", resize_value="400",
+                           output_dir=str(tmp_path / "out")))
 
 
 @pytest.mark.parametrize("quality", [0, -1, 101, 1000])

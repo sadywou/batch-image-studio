@@ -14,8 +14,9 @@ from PIL import Image
 tk = pytest.importorskip("tkinter")
 
 from app import ui  # noqa: E402
-from app.ui import (STATE_DONE, STATE_IDLE, STATE_QUEUED, STATE_RUNNING,  # noqa: E402
-                    SUPPORTED_EXTENSIONS, MainWindow, human_size, load_thumbnail,
+from app.ui import (STATE_DONE, STATE_IDLE,  # noqa: E402
+                    STATE_QUEUED, STATE_RUNNING,
+                    SUPPORTED_EXTENSIONS, human_size, load_thumbnail,
                     mix_colors)
 
 
@@ -39,43 +40,6 @@ class FakeMessageBox:
 
     def showerror(self, title="", message=""):
         self._record("error", title, message)
-
-
-@pytest.fixture()
-def window(tmp_path, monkeypatch):
-    """Открывает главное окно на временной базе и гарантированно закрывает его."""
-    dialogs = FakeMessageBox()
-    monkeypatch.setattr(ui, "messagebox", dialogs)
-
-    original = ui.DatabaseManager
-
-    def temp_manager(db_path=None):
-        return original(str(tmp_path / "ui.db"))
-
-    monkeypatch.setattr(ui, "DatabaseManager", temp_manager)
-    ui._THUMB_CACHE.clear()
-    ui.MainWindow._drop_hover = False
-    assert ui.DND_AVAILABLE is False, "conftest.py должен отключать tkinterdnd2"
-    assert ui.BaseWindow is tk.Tk
-
-    win = MainWindow()
-    win.withdraw()
-    win.dialogs = dialogs
-    try:
-        yield win
-    finally:
-        if win.worker and win.worker.is_alive():
-            win.worker.cancel()
-            win.worker.join(10)
-        try:
-            win.database.close()
-        except Exception:
-            pass
-        win.destroy()
-        ui._THUMB_CACHE.clear()
-        # Каждый тест работает со своим интерпретатором Tk, поэтому ссылки на
-        # стандартный корень нужно сбросить перед созданием следующего окна.
-        tk._default_root = None
 
 
 def make_png(path: Path, size=(200, 150), color=(90, 140, 200)) -> Path:
@@ -206,7 +170,7 @@ def test_build_preset_reads_form_fields(window, tmp_path):
     window.output_var.set(str(tmp_path))
     preset = window._build_preset()
     assert (preset.name, preset.output_format) == ("Профиль из формы", "PNG")
-    assert (preset.width, preset.height, preset.quality) == (640, 480, 65)
+    assert (preset.resize_mode, preset.resize_value, preset.quality) == ("FIT", "640x480", 65)
     assert preset.clear_exif is False and preset.keep_ratio is False
 
 
@@ -259,7 +223,6 @@ def test_full_processing_scenario(window, tmp_path):
     window._append_paths([str(make_png(tmp_path / f"f{i}.png")) for i in range(3)])
     window.format_var.set("PNG")
     window.width_var.set("120")
-    window.height_var.set("90")
     window.watermark_var.set(False)
     window.output_var.set(str(output))
 
@@ -362,7 +325,6 @@ def test_preview_shows_processed_result(window, tmp_path):
     window._append_paths([str(make_png(tmp_path / "one.png"))])
     window.format_var.set("PNG")
     window.width_var.set("160")
-    window.height_var.set("120")
     window.output_var.set(str(tmp_path / "out"))
     window.start_processing()
     assert pump(window, lambda: window.state == STATE_DONE, timeout=30)

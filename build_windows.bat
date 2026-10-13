@@ -7,7 +7,7 @@ REM    1. создаётся виртуальное окружение .venv;
 REM    2. устанавливаются зависимости и PyInstaller;
 REM    3. прогоняются автотесты и статический анализ;
 REM    4. создаётся иконка;
-REM    5. собирается один файл dist\ImageBatchStudio.exe.
+REM    5. собирается один файл dist\BatchImageStudio.exe.
 REM ==========================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
@@ -37,16 +37,16 @@ echo [4/5] Создание иконки приложения
 
 echo [5/5] Сборка исполняемого файла
 if exist "build\ImageBatchStudio" rmdir /s /q "build\ImageBatchStudio"
-if exist "dist\ImageBatchStudio.exe" del /q "dist\ImageBatchStudio.exe"
+if exist "dist\BatchImageStudio.exe" del /q "dist\BatchImageStudio.exe"
 %PY% -m PyInstaller ImageBatchStudio.spec --noconfirm --clean --log-level WARN || goto :error
 
-if not exist "dist\ImageBatchStudio.exe" goto :error
+if not exist "dist\BatchImageStudio.exe" goto :error
 
 echo.
 echo ==========================================================================
-echo  Готово: dist\ImageBatchStudio.exe
-for %%F in ("dist\ImageBatchStudio.exe") do echo  Размер: %%~zF байт
-echo  Запуск: dist\ImageBatchStudio.exe
+echo  Готово: dist\BatchImageStudio.exe
+for %%F in ("dist\BatchImageStudio.exe") do echo  Размер: %%~zF байт
+echo  Запуск: dist\BatchImageStudio.exe
 echo ==========================================================================
 endlocal
 exit /b 0

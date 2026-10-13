@@ -617,7 +617,7 @@ def build() -> Path:
           [
               ["Документация Sphinx (HTML)", "docs/_build/html/index.html"],
               ["Документация Sphinx (PDF, 49 страниц)",
-               "docs/_build/ImageBatchStudio_документация.pdf"],
+               "docs/_build/BatchImageStudio_документация.pdf"],
               ["Исходники документации", "docs/source/"],
               ["Приложение Б. Руководство программиста",
                "docs/_build/Приложение_Б_Руководство_программиста.docx"],
@@ -626,7 +626,7 @@ def build() -> Path:
               ["Приложение Г. Руководство системного программиста",
                "docs/_build/Приложение_Г_Руководство_системного_программиста.docx"],
               ["Презентация для защиты (13 слайдов)",
-               "docs/_build/ImageBatchStudio_презентация.pptx"],
+               "docs/_build/BatchImageStudio_презентация.pptx"],
               ["Бэклог продукта", "docs/source/backlog.rst"],
               ["Трекер дефектов", "docs/ISSUES.md"],
               ["Журнал изменений", "CHANGELOG.md"],

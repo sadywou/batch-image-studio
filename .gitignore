@@ -1,17 +1,46 @@
+# Служебные файлы Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Виртуальное окружение: зависимости восстанавливаются командой poetry install
 .venv/
 venv/
-.pytest_cache/
+
+# Отчёты о покрытии кода: пересчитываются командой pytest --cov
 .coverage
+coverage.xml
 htmlcov/
+
+# Локальная база данных: содержит личные профили пользователя
 data/*.db
 data/*.db-shm
 data/*.db-wal
+
+# Результат сборки исполняемого файла: 34 МБ, генерируется из исходников
 build/
 dist/
-# автоматически создаваемый PyInstaller-файл спецификации не сохраняем,
+
+# Собранная документация: PDF и HTML восстанавливаются командой
+# python tools/build_pdf.py и sphinx-build
+docs/_build/
+
+# Папка с выгрузкой готовых материалов для сдачи: дублирует файлы,
+# которые передаются преподавателю, и в репозитории не нужна
+docs/Итог*/
+
+# Служебные каталоги и временные файлы
+preview/
+*.tmp
+*.log
+
+# Автоматически создаваемый PyInstaller-файл спецификации не сохраняем,
 # используется только рукописный ImageBatchStudio.spec
 /ImageBatchStudio.spec.bak
-docs/_build/
-preview/
+
+# Редакторы и операционная система
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

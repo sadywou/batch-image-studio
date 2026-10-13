@@ -1,6 +1,6 @@
 """Сборка презентации для защиты практики.
 
-Создаёт файл docs/_build/ImageBatchStudio_презентация.pptx со слайдами
+Создаёт файл docs/_build/BatchImageStudio_презентация.pptx со слайдами
 в тёмной теме приложения: титульный, проблема, решение, архитектура,
 демонстрация, качество, развёртывание, документация, итоги, план.
 
@@ -19,7 +19,7 @@ from pptx.util import Cm, Pt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOTS = ROOT / "docs" / "screenshots"
-OUT = ROOT / "docs" / "_build" / "ImageBatchStudio_презентация.pptx"
+OUT = ROOT / "docs" / "_build" / "BatchImageStudio_презентация.pptx"
 
 PAGE = RGBColor(0x08, 0x0F, 0x1D)
 CARD = RGBColor(0x0E, 0x19, 0x2B)
@@ -343,7 +343,7 @@ def build() -> Path:
     number += 1
     slide_title(slide, "Развёртывание", "Один файл — и Python не нужен")
     metric_cards(slide, [
-        ("34,3 МБ", "размер ImageBatchStudio.exe", ACCENT),
+        ("34,3 МБ", "размер BatchImageStudio.exe", ACCENT),
         ("1,0 с", "до готовности окна", MINT),
         ("5", "шагов в build_windows.bat", CYAN),
     ], top=4.4)
@@ -407,7 +407,7 @@ def build() -> Path:
     ], space=12)
     box = slide.shapes.add_textbox(Cm(2.4), Cm(12.6), Cm(29), Cm(3.4))
     set_text(box.text_frame, [
-        ("Демонстрация: dist\\ImageBatchStudio.exe", 15, HINT, False),
+        ("Демонстрация: dist\\BatchImageStudio.exe", 15, HINT, False),
         ("Документация: docs\\_build\\html\\index.html", 15, HINT, False),
     ], space=4)
     footer(slide, number)

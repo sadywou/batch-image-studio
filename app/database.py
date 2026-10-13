@@ -112,68 +112,154 @@ class DatabaseManager:
         self._create_schema()
         self._seed_formats()
 
+    #: Соответствие статусов интерфейса значениям из технического задания.
+    STATUS_IN_DB = {"Готово": "SUCCESS", "Ошибка": "ERROR", "Отменено": "ERROR"}
+
     def _create_schema(self) -> None:
-        """Создаёт таблицы и безопасно расширяет БД предыдущих версий."""
+        """Создаёт таблицы по техническому заданию и обновляет старые базы.
+
+        Наименования таблиц и столбцов соответствуют разделу 4.3.2
+        технического задания. Базы предыдущих версий обновляются на месте:
+        старые столбцы переименовываются, новые добавляются, данные
+        сохраняются.
+        """
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS tbl_formats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
+                format_name TEXT NOT NULL UNIQUE
             );
             CREATE TABLE IF NOT EXISTS tbl_presets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 preset_name TEXT NOT NULL UNIQUE,
                 format_id INTEGER NOT NULL,
-                width INTEGER CHECK(width IS NULL OR width > 0),
-                height INTEGER CHECK(height IS NULL OR height > 0),
-                quality INTEGER NOT NULL DEFAULT 85 CHECK(quality BETWEEN 1 AND 100),
-                clear_exif INTEGER NOT NULL DEFAULT 1,
+                resize_mode TEXT NOT NULL DEFAULT 'WIDTH',
+                resize_value TEXT NOT NULL DEFAULT '1920',
+                compression_quality INTEGER NOT NULL DEFAULT 85
+                    CHECK(compression_quality BETWEEN 1 AND 100),
+                strip_metadata INTEGER NOT NULL DEFAULT 1,
                 keep_ratio INTEGER NOT NULL DEFAULT 1,
                 output_dir TEXT DEFAULT '',
                 FOREIGN KEY(format_id) REFERENCES tbl_formats(id)
             );
             CREATE TABLE IF NOT EXISTS tbl_watermarks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                preset_id INTEGER NOT NULL UNIQUE,
-                watermark_text TEXT DEFAULT '',
-                watermark_path TEXT,
-                opacity INTEGER NOT NULL DEFAULT 75 CHECK(opacity BETWEEN 0 AND 100),
-                position TEXT NOT NULL DEFAULT 'bottom-right',
+                preset_id INTEGER PRIMARY KEY,
+                wm_type TEXT NOT NULL DEFAULT 'TEXT',
+                wm_content TEXT NOT NULL DEFAULT '',
+                wm_opacity REAL NOT NULL DEFAULT 0.75,
+                wm_position TEXT NOT NULL DEFAULT 'bottom-right',
+                wm_size INTEGER NOT NULL DEFAULT 4,
+                wm_color TEXT NOT NULL DEFAULT '#FFFFFF',
                 enabled INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(preset_id) REFERENCES tbl_presets(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS tbl_history_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                session_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 finished_at TEXT,
                 preset_id INTEGER,
                 preset_name TEXT,
                 total_files INTEGER NOT NULL DEFAULT 0,
                 successful_files INTEGER NOT NULL DEFAULT 0,
                 failed_files INTEGER NOT NULL DEFAULT 0,
-                duration REAL NOT NULL DEFAULT 0,
+                duration_sec REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY(preset_id) REFERENCES tbl_presets(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS tbl_processed_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER NOT NULL,
                 source_path TEXT NOT NULL,
-                output_path TEXT,
-                size_before INTEGER DEFAULT 0,
-                size_after INTEGER DEFAULT 0,
+                result_path TEXT,
+                file_size_before INTEGER DEFAULT 0,
+                file_size_after INTEGER DEFAULT 0,
                 status TEXT NOT NULL,
                 error TEXT,
                 FOREIGN KEY(session_id) REFERENCES tbl_history_sessions(id) ON DELETE CASCADE
             );
             """
         )
-        self._ensure_column("tbl_watermarks", "enabled", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("tbl_history_sessions", "finished_at", "TEXT")
-        self._ensure_column("tbl_history_sessions", "preset_name", "TEXT")
-        self._ensure_column("tbl_history_sessions", "successful_files", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("tbl_history_sessions", "failed_files", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("tbl_processed_files", "error", "TEXT")
+        self._migrate_legacy_schema()
         self.connection.commit()
+
+    #: Переименования столбцов предыдущих версий в названия технического задания.
+    RENAMED_COLUMNS = (
+        ("tbl_formats", "name", "format_name"),
+        ("tbl_presets", "quality", "compression_quality"),
+        ("tbl_presets", "clear_exif", "strip_metadata"),
+        ("tbl_history_sessions", "started_at", "session_date"),
+        ("tbl_history_sessions", "duration", "duration_sec"),
+        ("tbl_processed_files", "output_path", "result_path"),
+        ("tbl_processed_files", "size_before", "file_size_before"),
+        ("tbl_processed_files", "size_after", "file_size_after"),
+    )
+
+    #: Столбцы, которые требуется создать при обновлении старой базы.
+    NEW_COLUMNS = (
+        ("tbl_presets", "resize_mode", "TEXT NOT NULL DEFAULT 'WIDTH'"),
+        ("tbl_presets", "resize_value", "TEXT NOT NULL DEFAULT '1920'"),
+        ("tbl_watermarks", "wm_type", "TEXT NOT NULL DEFAULT 'TEXT'"),
+        ("tbl_watermarks", "wm_content", "TEXT NOT NULL DEFAULT ''"),
+        ("tbl_watermarks", "wm_opacity", "REAL NOT NULL DEFAULT 0.75"),
+        ("tbl_watermarks", "wm_position", "TEXT NOT NULL DEFAULT 'bottom-right'"),
+        ("tbl_watermarks", "wm_size", "INTEGER NOT NULL DEFAULT 4"),
+        ("tbl_watermarks", "wm_color", "TEXT NOT NULL DEFAULT '#FFFFFF'"),
+        ("tbl_watermarks", "enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("tbl_history_sessions", "finished_at", "TEXT"),
+        ("tbl_history_sessions", "preset_name", "TEXT"),
+        ("tbl_history_sessions", "successful_files", "INTEGER NOT NULL DEFAULT 0"),
+        ("tbl_history_sessions", "failed_files", "INTEGER NOT NULL DEFAULT 0"),
+        ("tbl_processed_files", "error", "TEXT"),
+    )
+
+    def _migrate_legacy_schema(self) -> None:
+        """Обновляет базу предыдущей версии до схемы технического задания."""
+        for table, old, new in self.RENAMED_COLUMNS:
+            self._rename_column(table, old, new)
+        for table, column, definition in self.NEW_COLUMNS:
+            self._ensure_column(table, column, definition)
+        self._convert_watermark_rows()
+        self._convert_statuses()
+
+    def _rename_column(self, table: str, old: str, new: str) -> None:
+        """Переименовывает столбец, если он ещё не приведён к новой схеме."""
+        if table not in self.SCHEMA_TABLES:
+            raise ValueError(f"Неизвестная таблица миграции: {table}")
+        for name in (old, new):
+            if not self.IDENTIFIER_PATTERN.match(name):
+                raise ValueError(f"Недопустимое имя столбца: {name}")
+        columns = {row[1] for row in
+                   self.connection.execute(f"PRAGMA table_info({table})")}
+        if old in columns and new not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+
+    def _convert_watermark_rows(self) -> None:
+        """Переносит текст и прозрачность старых знаков в новые столбцы."""
+        columns = {row[1] for row in
+                   self.connection.execute("PRAGMA table_info(tbl_watermarks)")}
+        legacy = {"watermark_text", "watermark_path", "opacity", "position", "id"}
+        if not (legacy & columns):
+            return
+        rows = self.connection.execute(
+            "SELECT preset_id, watermark_text, watermark_path, opacity, position "
+            "FROM tbl_watermarks").fetchall()
+        for preset_id, text, path, opacity, position in rows:
+            content = (path or "").strip() or (text or "").strip()
+            wm_type = "IMAGE" if (path or "").strip() else "TEXT"
+            value = round(float(opacity or 0) / 100, 2)
+            self.connection.execute(
+                "UPDATE tbl_watermarks SET wm_type=?, wm_content=?, "
+                "wm_opacity=?, wm_position=? WHERE preset_id=?",
+                (wm_type, content, value, position or "bottom-right", preset_id))
+
+    def _convert_statuses(self) -> None:
+        """Переводит русские статусы журнала в значения из технического задания."""
+        self.connection.execute(
+            "UPDATE tbl_processed_files SET status='SUCCESS' "
+            "WHERE status='Готово'")
+        self.connection.execute(
+            "UPDATE tbl_processed_files SET status='ERROR' "
+            "WHERE status IN ('Ошибка', 'Отменено')")
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         """Добавляет отсутствующий столбец, отвергая подозрительные имена.
@@ -184,7 +270,9 @@ class DatabaseManager:
         """
         if table not in self.SCHEMA_TABLES:
             raise ValueError(f"Неизвестная таблица миграции: {table}")
-        if not self.IDENTIFIER_PATTERN.match(table) or not self.IDENTIFIER_PATTERN.match(column):
+        if not self.IDENTIFIER_PATTERN.match(table):
+            raise ValueError(f"Недопустимое имя таблицы миграции: {table}")
+        if not self.IDENTIFIER_PATTERN.match(column):
             raise ValueError(f"Недопустимое имя объекта миграции: {table}.{column}")
         if not self.DEFINITION_PATTERN.match(definition):
             raise ValueError(f"Недопустимое определение столбца: {definition}")
@@ -195,7 +283,7 @@ class DatabaseManager:
     def _seed_formats(self) -> None:
         """Заполняет справочник целевых форматов."""
         self.connection.executemany(
-            "INSERT OR IGNORE INTO tbl_formats(name) VALUES (?)",
+            "INSERT OR IGNORE INTO tbl_formats(format_name) VALUES (?)",
             [(name,) for name in ("PNG", "JPG", "WebP", "BMP", "TIFF", "GIF", "ICO", "HEIC", "AVIF")],
         )
         self.connection.commit()
@@ -207,7 +295,7 @@ class DatabaseManager:
         Returns:
             Названия форматов, например ``["AVIF", "BMP", "GIF", ...]``.
         """
-        return [row[0] for row in self.connection.execute("SELECT name FROM tbl_formats ORDER BY name")]
+        return [row[0] for row in self.connection.execute("SELECT format_name FROM tbl_formats ORDER BY format_name")]
 
     def create_format(self, name: str) -> None:
         """Добавляет формат в справочник.
@@ -221,7 +309,7 @@ class DatabaseManager:
         name = name.strip()
         if not name:
             raise ValueError("Название формата не может быть пустым")
-        self.connection.execute("INSERT INTO tbl_formats(name) VALUES (?)", (name,))
+        self.connection.execute("INSERT INTO tbl_formats(format_name) VALUES (?)", (name,))
         self.connection.commit()
 
     def update_format(self, old_name: str, new_name: str) -> None:
@@ -236,7 +324,9 @@ class DatabaseManager:
         """
         if not new_name.strip():
             raise ValueError("Название формата не может быть пустым")
-        self.connection.execute("UPDATE tbl_formats SET name=? WHERE name=?", (new_name.strip(), old_name))
+        self.connection.execute(
+            "UPDATE tbl_formats SET format_name=? WHERE format_name=?",
+            (new_name.strip(), old_name))
         self.connection.commit()
 
     def delete_format(self, name: str) -> None:
@@ -250,10 +340,10 @@ class DatabaseManager:
         """
         used = self.connection.execute(
             "SELECT 1 FROM tbl_presets p JOIN tbl_formats f "
-            "ON f.id=p.format_id WHERE f.name=?", (name,)).fetchone()
+            "ON f.id=p.format_id WHERE f.format_name=?", (name,)).fetchone()
         if used:
             raise ValueError("Нельзя удалить формат, используемый сохранённым профилем")
-        self.connection.execute("DELETE FROM tbl_formats WHERE name=?", (name,))
+        self.connection.execute("DELETE FROM tbl_formats WHERE format_name=?", (name,))
         self.connection.commit()
 
     def create_preset(self, preset: Preset) -> None:
@@ -270,9 +360,11 @@ class DatabaseManager:
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO tbl_presets
-                (preset_name, format_id, width, height, quality, clear_exif, keep_ratio, output_dir)
+                (preset_name, format_id, resize_mode, resize_value,
+                 compression_quality, strip_metadata, keep_ratio, output_dir)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (preset.name.strip(), format_id, preset.width, preset.height, preset.quality,
+                (preset.name.strip(), format_id, preset.resize_mode,
+                 preset.resize_value, preset.quality,
                  int(preset.clear_exif), int(preset.keep_ratio), preset.output_dir),
             )
             self._save_watermark(cursor.lastrowid, preset)
@@ -295,9 +387,11 @@ class DatabaseManager:
             raise ValueError(f"Профиль «{key}» не найден")
         with self.connection:
             self.connection.execute(
-                """UPDATE tbl_presets SET preset_name=?, format_id=?, width=?, height=?, quality=?,
-                clear_exif=?, keep_ratio=?, output_dir=? WHERE id=?""",
-                (preset.name.strip(), format_id, preset.width, preset.height, preset.quality,
+                """UPDATE tbl_presets SET preset_name=?, format_id=?, resize_mode=?,
+                resize_value=?, compression_quality=?, strip_metadata=?,
+                keep_ratio=?, output_dir=? WHERE id=?""",
+                (preset.name.strip(), format_id, preset.resize_mode,
+                 preset.resize_value, preset.quality,
                  int(preset.clear_exif), int(preset.keep_ratio), preset.output_dir, row[0]),
             )
             self._save_watermark(row[0], preset)
@@ -322,38 +416,59 @@ class DatabaseManager:
             с таким именем нет.
         """
         row = self.connection.execute(
-            """SELECT p.id, p.preset_name, f.name, p.width, p.height, p.quality,
-            p.clear_exif, p.keep_ratio, p.output_dir, w.enabled, w.watermark_text,
-            w.position, w.opacity
+            """SELECT p.id, p.preset_name, f.format_name, p.resize_mode,
+            p.resize_value, p.compression_quality, p.strip_metadata,
+            p.keep_ratio, p.output_dir, w.enabled, w.wm_type, w.wm_content,
+            w.wm_position, w.wm_opacity, w.wm_size, w.wm_color
             FROM tbl_presets p JOIN tbl_formats f ON f.id=p.format_id
             LEFT JOIN tbl_watermarks w ON w.preset_id=p.id WHERE p.preset_name=?""", (name,)
         ).fetchone()
         if not row:
             return None
-        return Preset(name=row[1], output_format=row[2], width=row[3], height=row[4],
-                      quality=row[5], clear_exif=bool(row[6]), keep_ratio=bool(row[7]),
-                      output_dir=row[8] or "", watermark_enabled=bool(row[9]),
-                      watermark_text=row[10] or "", watermark_position=row[11] or "bottom-right",
-                      watermark_opacity=row[12] if row[12] is not None else 75)
+        wm_type = row[10] or "TEXT"
+        opacity = row[13]
+        return Preset(
+            name=row[1], output_format=row[2],
+            resize_mode=row[3] or "WIDTH",
+            # Пустая строка значит «значение не требуется», поэтому
+            # подставлять замену только при отсутствии столбца (None).
+            resize_value=row[4] if row[4] is not None else "1920",
+            quality=row[5], clear_exif=bool(row[6]), keep_ratio=bool(row[7]),
+            output_dir=row[8] or "", watermark_enabled=bool(row[9]),
+            watermark_type=wm_type,
+            watermark_text=(row[11] or "") if wm_type == "TEXT" else "",
+            watermark_image=(row[11] or "") if wm_type == "IMAGE" else "",
+            watermark_position=row[12] or "bottom-right",
+            watermark_opacity=(round(float(opacity) * 100)
+                               if opacity is not None else 75),
+            watermark_size=row[14] or 4, watermark_color=row[15] or "#FFFFFF")
 
     def list_presets(self) -> List[str]:
         """Возвращает отсортированный список названий сохранённых профилей."""
         return [row[0] for row in self.connection.execute("SELECT preset_name FROM tbl_presets ORDER BY preset_name")]
 
     def _format_id(self, name: str) -> int:
-        row = self.connection.execute("SELECT id FROM tbl_formats WHERE name=?", (name,)).fetchone()
+        row = self.connection.execute("SELECT id FROM tbl_formats WHERE format_name=?", (name,)).fetchone()
         if row is None:
             raise ValueError(f"Неизвестный формат: {name}")
         return row[0]
 
     def _save_watermark(self, preset_id: int, preset: Preset) -> None:
         self.connection.execute(
-            """INSERT INTO tbl_watermarks(preset_id, watermark_text, opacity, position, enabled)
-            VALUES (?, ?, ?, ?, ?) ON CONFLICT(preset_id) DO UPDATE SET
-            watermark_text=excluded.watermark_text, opacity=excluded.opacity,
-            position=excluded.position, enabled=excluded.enabled""",
-            (preset_id, preset.watermark_text, preset.watermark_opacity,
-             preset.watermark_position, int(preset.watermark_enabled)),
+            """INSERT INTO tbl_watermarks
+            (preset_id, wm_type, wm_content, wm_opacity, wm_position,
+             wm_size, wm_color, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(preset_id) DO UPDATE SET
+            wm_type=excluded.wm_type, wm_content=excluded.wm_content,
+            wm_opacity=excluded.wm_opacity, wm_position=excluded.wm_position,
+            wm_size=excluded.wm_size, wm_color=excluded.wm_color,
+            enabled=excluded.enabled""",
+            (preset_id, preset.watermark_type,
+             preset.watermark_image if preset.watermark_type == "IMAGE"
+             else preset.watermark_text,
+             round(preset.watermark_opacity / 100, 2), preset.watermark_position,
+             preset.watermark_size, preset.watermark_color,
+             int(preset.watermark_enabled)),
         )
 
     # tbl_watermarks CRUD (by profile name)
@@ -368,11 +483,12 @@ class DatabaseManager:
             ``enabled`` или ``None``, если настроек нет.
         """
         row = self.connection.execute(
-            "SELECT w.watermark_text, w.watermark_path, w.opacity, w.position, w.enabled "
-            "FROM tbl_watermarks w JOIN tbl_presets p ON p.id=w.preset_id WHERE p.preset_name=?",
+            "SELECT w.wm_type, w.wm_content, w.wm_opacity, w.wm_position, w.enabled "
+            "FROM tbl_watermarks w JOIN tbl_presets p ON p.id=w.preset_id "
+            "WHERE p.preset_name=?",
             (preset_name,),
         ).fetchone()
-        return dict(zip(("text", "path", "opacity", "position", "enabled"), row)) if row else None
+        return dict(zip(("type", "content", "opacity", "position", "enabled"), row)) if row else None
 
     def save_watermark(self, preset_name: str, text: str, opacity: int = 75,
                        position: str = "bottom-right", enabled: bool = True,
@@ -395,11 +511,14 @@ class DatabaseManager:
             raise ValueError(f"Профиль «{preset_name}» не найден")
         with self.connection:
             self.connection.execute(
-                """INSERT INTO tbl_watermarks(preset_id, watermark_text, watermark_path, opacity, position, enabled)
+                """INSERT INTO tbl_watermarks
+                (preset_id, wm_type, wm_content, wm_opacity, wm_position, enabled)
                 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(preset_id) DO UPDATE SET
-                watermark_text=excluded.watermark_text, watermark_path=excluded.watermark_path,
-                opacity=excluded.opacity, position=excluded.position, enabled=excluded.enabled""",
-                (row[0], text, image_path, opacity, position, int(enabled)),
+                wm_type=excluded.wm_type, wm_content=excluded.wm_content,
+                wm_opacity=excluded.wm_opacity, wm_position=excluded.wm_position,
+                enabled=excluded.enabled""",
+                (row[0], "IMAGE" if image_path else "TEXT",
+                 image_path or text, round(opacity / 100, 2), position, int(enabled)),
             )
 
     def delete_watermark(self, preset_name: str) -> None:
@@ -446,10 +565,11 @@ class DatabaseManager:
         before = item.source.stat().st_size if item.source.exists() else 0
         after = item.output.stat().st_size if item.output and item.output.exists() else 0
         self.connection.execute(
-            """INSERT INTO tbl_processed_files(session_id, source_path, output_path, size_before,
-            size_after, status, error) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO tbl_processed_files(session_id, source_path, result_path,
+            file_size_before, file_size_after, status, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (session_id, str(item.source), str(item.output) if item.output else None,
-             before, after, item.status, item.error),
+             before, after, self.STATUS_IN_DB.get(item.status, "ERROR"), item.error),
         )
         self.connection.commit()
 
@@ -465,7 +585,7 @@ class DatabaseManager:
         failed = sum(item.status == "Ошибка" for item in items)
         with self.connection:
             self.connection.execute(
-                """UPDATE tbl_history_sessions SET finished_at=CURRENT_TIMESTAMP, duration=?,
+                """UPDATE tbl_history_sessions SET finished_at=CURRENT_TIMESTAMP, duration_sec=?,
                 successful_files=?, failed_files=? WHERE id=?""",
                 (duration, success, failed, session_id),
             )
@@ -482,8 +602,8 @@ class DatabaseManager:
             всего файлов, успешно, с ошибкой, длительность.
         """
         return self.connection.execute(
-            """SELECT id, started_at, finished_at, preset_name, total_files,
-            successful_files, failed_files, duration FROM tbl_history_sessions
+            """SELECT id, session_date, finished_at, preset_name, total_files,
+            successful_files, failed_files, duration_sec FROM tbl_history_sessions
             ORDER BY id DESC LIMIT ?""", (max(1, min(int(limit), 1000)),)
         ).fetchall()
 
@@ -498,8 +618,8 @@ class DatabaseManager:
             размер до, размер после, статус, текст ошибки.
         """
         return self.connection.execute(
-            "SELECT id, source_path, output_path, size_before, size_after, status, error "
-            "FROM tbl_processed_files WHERE session_id=? ORDER BY id", (session_id,)
+            "SELECT id, source_path, result_path, file_size_before, file_size_after, "
+            "status, error FROM tbl_processed_files WHERE session_id=? ORDER BY id", (session_id,)
         ).fetchall()
 
     def update_processed_file(self, file_id: int, *, output_path: Optional[str],
@@ -520,8 +640,9 @@ class DatabaseManager:
             raise ValueError("Размер результата не может быть отрицательным")
         with self.connection:
             cursor = self.connection.execute(
-                "UPDATE tbl_processed_files SET output_path=?, size_after=?, status=?, error=? WHERE id=?",
-                (output_path, size_after, status, error, file_id),
+                "UPDATE tbl_processed_files SET result_path=?, file_size_after=?, "
+                "status=?, error=? WHERE id=?",
+                (output_path, size_after, self.STATUS_IN_DB.get(status, status), error, file_id),
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"Запись файла {file_id} не найдена")

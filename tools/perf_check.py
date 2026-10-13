@@ -93,8 +93,9 @@ def main() -> None:
           f"{(time.perf_counter() - started):.1f} с\n")
 
     processor = ImageProcessor()
-    preset = Preset(name="perf", output_format="WebP", width=1280, height=720,
-                    quality=80, keep_ratio=True, watermark_enabled=True,
+    preset = Preset(name="perf", output_format="WebP", resize_mode="WIDTH",
+                    resize_value="1280", quality=80, keep_ratio=True,
+                    watermark_enabled=True, watermark_type="TEXT",
                     watermark_text="STUDIO", watermark_opacity=70,
                     output_dir=str(output_folder))
 
@@ -121,9 +122,11 @@ def main() -> None:
 
     # --- операции со слоем данных ------------------------------------------
     database = DatabaseManager(str(db_path))
-    form_preset = Preset(name="perf", output_format="WebP", width=1280,
-                         height=720, quality=80, watermark_enabled=True,
-                         watermark_text="STUDIO", output_dir=str(output_folder))
+    form_preset = Preset(name="perf", output_format="WebP",
+                         resize_mode="WIDTH", resize_value="1280",
+                         quality=80, watermark_enabled=True,
+                         watermark_type="TEXT", watermark_text="STUDIO",
+                         output_dir=str(output_folder))
     database.create_preset(form_preset)
 
     report["measurements"].append(measure(

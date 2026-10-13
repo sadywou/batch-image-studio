@@ -37,12 +37,12 @@ def test_profiles_survive_reopening():
     first = DatabaseManager()
     first.delete_preset("persist-deploy")          # предупреждение о повторе прогона
     first.create_preset(Preset(name="persist-deploy", output_format="PNG",
-                               width=321))
+                               resize_mode="WIDTH", resize_value="321"))
     first.close()
 
     second = DatabaseManager()
     try:
-        assert second.get_preset("persist-deploy").width == 321
+        assert second.get_preset("persist-deploy").resize_value == "321"
     finally:
         second.delete_preset("persist-deploy")
         second.close()
@@ -52,7 +52,7 @@ def test_profiles_survive_reopening():
 
 
 def test_frozen_mode_prefers_folder_next_to_executable(tmp_path, monkeypatch):
-    executable = tmp_path / "dist" / "ImageBatchStudio.exe"
+    executable = tmp_path / "dist" / "BatchImageStudio.exe"
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"MZ")
     monkeypatch.setattr(database_module.sys, "frozen", True, raising=False)
@@ -65,7 +65,7 @@ def test_frozen_mode_prefers_folder_next_to_executable(tmp_path, monkeypatch):
 
 def test_frozen_mode_falls_back_to_local_appdata(tmp_path, monkeypatch):
     """Если папка рядом с .exe недоступна для записи, выбирается %LOCALAPPDATA%."""
-    executable = tmp_path / "dist" / "ImageBatchStudio.exe"
+    executable = tmp_path / "dist" / "BatchImageStudio.exe"
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"MZ")
     monkeypatch.setattr(database_module.sys, "frozen", True, raising=False)
@@ -96,7 +96,7 @@ def test_all_candidates_readonly_raises_clear_error(tmp_path):
 def test_frozen_candidate_order_includes_three_locations(tmp_path, monkeypatch):
     monkeypatch.setattr(database_module.sys, "frozen", True, raising=False)
     monkeypatch.setattr(database_module.sys, "executable",
-                        str(tmp_path / "ImageBatchStudio.exe"))
+                        str(tmp_path / "BatchImageStudio.exe"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     candidates = candidate_data_dirs()
     assert len(candidates) == 3

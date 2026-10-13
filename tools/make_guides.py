@@ -161,7 +161,7 @@ def programmer_guide() -> Document:
     head(document, "3.1. Процедуры вызова программы", level=2)
     text(document,
          "Программа запускается двойным щелчком по файлу "
-         "ImageBatchStudio.exe либо командой python -m app.main из каталога "
+         "BatchImageStudio.exe либо командой python -m app.main из каталога "
          "проекта при работе с исходными файлами. Дополнительно имеются "
          "скрипты run_windows.bat и run_linux.sh.")
     text(document, "Вход в систему не предусмотрен: пароль не вводится, "
@@ -290,8 +290,8 @@ def user_guide() -> Document:
     head(document, "3. Выполнение программы")
     head(document, "3.1. Загрузка и запуск программы", level=2)
     text(document, "Для запуска программы необходимо:")
-    item(document, "скопировать файл ImageBatchStudio.exe в папку, "
-                   "доступную для записи, например C:\\ImageBatchStudio;")
+    item(document, "скопировать файл BatchImageStudio.exe в папку, "
+                   "доступную для записи, например C:\\BatchImageStudio;")
     item(document, "дважды щёлкнуть по файлу;")
     item(document, "дождаться открытия окна программы — время готовности "
                    "около одной секунды.")
@@ -420,9 +420,9 @@ def admin_guide() -> Document:
     text(document,
          "Программа устанавливается на рабочую станцию с двумя ядрами "
          "процессора и 4 ГБ оперативной памяти. Готовый файл "
-         "ImageBatchStudio.exe размещается в папке, доступной пользователю "
+         "BatchImageStudio.exe размещается в папке, доступной пользователю "
          "для записи. При недостатке прав программа автоматически размещает "
-         "рабочую базу в папке %LOCALAPPDATA%\\ImageBatchStudio.")
+         "рабочую базу в папке %LOCALAPPDATA%\\BatchImageStudio.")
 
     head(document, "3.2. Выбор функций", level=2)
     text(document, "Все функции программы доступны без дополнительной настройки. "

@@ -1,6 +1,8 @@
 """Графический интерфейс пакетного конвертера на Tkinter."""
+import os
 import queue
 import sqlite3
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.ttk as ttk
@@ -43,6 +45,11 @@ def _resolve_base_window() -> type:
 
 
 BaseWindow = _resolve_base_window()
+
+#: Папка со собранной документацией: рядом с .exe, иначе рядом с проектом.
+DOCS_DIR = (Path(sys.executable).resolve().parent / "docs"
+            if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parent.parent / "docs" / "_build")
 
 # Состояния интерфейса, повторяющие макеты «Начало», «Процесс» и «Готово».
 STATE_IDLE = "Начало — добавление файлов"
@@ -97,10 +104,23 @@ FONTS = {
 }
 
 POSITION_LABELS = {
-    "bottom-right": "Правый нижний угол",
-    "top-right": "Правый верхний угол",
-    "bottom-left": "Левый нижний угол",
-    "top-left": "Левый верхний угол",
+    "top-left": "Левый верхний",
+    "top-center": "Верхний центр",
+    "top-right": "Правый верхний",
+    "middle-left": "Левый центр",
+    "center": "Центр",
+    "middle-right": "Правый центр",
+    "bottom-left": "Левый нижний",
+    "bottom-center": "Нижний центр",
+    "bottom-right": "Правый нижний",
+}
+
+#: Внутренние отступы прокручиваемой карточки настроек, в пикселях.
+PAD = 24
+
+WATERMARK_TYPE_LABELS = {
+    "TEXT": "Текстовый знак",
+    "IMAGE": "Логотип (PNG)",
 }
 
 STATUS_COLORS = {
@@ -431,6 +451,417 @@ class RoundedButton(tk.Canvas):
                              foreground)
 
 
+class RoundedCombo(tk.Canvas):
+    """Выпадающий список в едином стиле со скруглёнными полями.
+
+    Стандартный список ttk на Windows выглядит устаревшим и не совпадает
+    с оформлением остальных элементов, поэтому поле и раскрывающийся
+    список полностью отрисовываются на Canvas.
+    """
+
+    RADIUS = 11
+    ROW_HEIGHT = 34
+    #: Предельное число одновременно показанных строк.
+    MAX_VISIBLE = 8
+
+    def __init__(self, parent, variable, values, background, height=44,
+                 padx=16, font=None, command=None, width=None):
+        """Создаёт поле списка.
+
+        Args:
+            parent: Родительский виджет.
+            variable: Переменная со значением списка.
+            values: Доступные значения.
+            background: Цвет родителя для бесшовно вписанного холста.
+            height: Высота закрытого поля.
+            padx: Отступ текста от краёв.
+            font: Шрифт текста.
+            command: Обработчик выбора значения.
+            width: Ширина в пикселях. Если не задана, берётся по самому
+                длинному значению списка.
+        """
+        self._padx = padx
+        self._font_spec = font or FONTS["value"]
+        self._measure = tkfont.Font(font=self._font_spec)
+        super().__init__(parent, width=width or 160, height=height,
+                         bg=background, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=0)
+        self.variable = variable
+        self.values = list(values)
+        self.command = command
+        self.padx = padx
+        if width is None:
+            self.configure(width=self.natural_width())
+        self._font_spec = font or FONTS["value"]
+        self._measure = tkfont.Font(font=self._font_spec)
+        self._hovered = False
+        self._focused = False
+        self._popup = None
+        self._popup_canvas = None
+        self._popup_rows = []
+        self._popup_width = 0
+        self._popup_visible = 0
+        self._hover_row = -1
+        self._scroll_top = 0
+
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Enter>", self._hover_on)
+        self.bind("<Leave>", self._hover_off)
+        self.bind("<FocusIn>", self._focus_on, add="+")
+        self.bind("<FocusOut>", self._focus_off, add="+")
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        variable.trace_add("write", lambda *_args: self._draw())
+        self._draw()
+
+    # ---------------------------------------------------------- отрисовка
+
+    def _draw(self) -> None:
+        """Рисует скруглённое поле со значением и стрелкой."""
+        self.delete("all")
+        width = max(self.winfo_width(), 40)
+        height = max(self.winfo_height(), 24)
+        fill = COLORS["grey_hover"] if self._hovered else COLORS["page"]
+        if self._focused:
+            outline = COLORS["purple"]
+        else:
+            outline = COLORS["purple_border"] if self._hovered else COLORS["grey_border"]
+        rounded_polygon(self, 1, 1, width - 1, height - 1, self.RADIUS,
+                        fill=fill, outline=outline, width=1)
+        self.create_text(self.padx, height / 2, text=self.variable.get(),
+                         fill=COLORS["text"], font=self._font_spec, anchor="w")
+        self._draw_chevron(height / 2)
+
+    def _draw_chevron(self, center_y: float) -> None:
+        """Рисует стрелку раскрытия списка.
+
+        Args:
+            center_y: Вертикальный центр стрелки.
+        """
+        center_x = self._chevron_x()
+        arrow = COLORS["purple_hover"] if self._hovered else COLORS["section"]
+        self.create_line(center_x - 5, center_y - 2, center_x, center_y + 3,
+                         fill=arrow, width=2, capstyle="round",
+                         joinstyle="round")
+        self.create_line(center_x, center_y + 3, center_x + 5, center_y - 2,
+                         fill=arrow, width=2, capstyle="round",
+                         joinstyle="round")
+
+    def _hover_on(self, _event=None) -> None:
+        """Подсвечивает поле при наведении."""
+        self._hovered = True
+        self._draw()
+
+    def _hover_off(self, _event=None) -> None:
+        """Убирает подсветку поля."""
+        self._hovered = False
+        self._draw()
+
+    def _focus_on(self, _event=None) -> None:
+        """Выделяет поле рамкой при получении фокуса с клавиатуры."""
+        self._focused = True
+        self._draw()
+
+    def _focus_off(self, _event=None) -> None:
+        """Снимает рамку активного поля."""
+        self._focused = False
+        self._draw()
+
+    def _chevron_x(self) -> int:
+        """Возвращает координату центра стрелки справа."""
+        return max(self.winfo_width(), 40) - 22
+
+    # ------------------------------------------------------ раскрывающийся список
+
+    def _toggle(self, _event=None) -> None:
+        """Открывает список при клике и закрывает его повторным кликом."""
+        if self._popup is None:
+            self._open()
+        else:
+            self.close()
+
+    def _open(self) -> None:
+        """Показывает всплывающий список под полем."""
+        self.focus_set()
+        root = self.winfo_toplevel()
+        popup = tk.Toplevel(root)
+        popup.overrideredirect(True)
+        popup.configure(bg=COLORS["page"])
+        width = max(self.winfo_width(), 60)
+        rows = self.values or [""]
+        visible = min(len(rows), self.MAX_VISIBLE)
+        height = visible * self.ROW_HEIGHT + 12
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 6
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        if x + width > screen_w - 8:
+            x = max(8, screen_w - width - 8)
+        if y + height > screen_h - 8:
+            y = max(8, self.winfo_rooty() - height - 6)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+
+        canvas = tk.Canvas(popup, width=width, height=height,
+                           bg=COLORS["page"], highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+        rounded_polygon(canvas, 1, 1, width - 1, height - 1, self.RADIUS,
+                        fill=COLORS["page"], outline=COLORS["grey_border"],
+                        width=1)
+
+        self._popup = popup
+        self._popup_canvas = canvas
+        self._popup_rows = rows
+        self._hover_row = -1
+        self._popup_width = width
+        self._popup_visible = visible
+
+        canvas.bind("<Configure>", lambda _event: self._draw_rows())
+        canvas.bind("<Motion>", self._row_motion)
+        canvas.bind("<Button-1>", self._row_click)
+        canvas.bind("<Leave>", lambda _event: self._clear_row_hover())
+        popup.bind("<Escape>", lambda _event: self.close())
+        popup.bind("<FocusOut>", lambda _event: self.after(80, self._close_if_lost))
+        self._draw_rows()
+        popup.focus_force()
+
+    def _draw_rows(self) -> None:
+        """Перерисовывает строки списка с подсветкой наведённой."""
+        canvas = self._popup_canvas
+        canvas.delete("all")
+        width = self._popup_width
+        height = max(canvas.winfo_height(), 10)
+        rounded_polygon(canvas, 1, 1, width - 1, height - 1, self.RADIUS,
+                        fill=COLORS["page"], outline=COLORS["grey_border"],
+                        width=1)
+        rows = self._popup_rows
+        top = max(0, self._scroll_offset())
+        for index in range(top, min(len(rows), top + self._popup_visible)):
+            index_y = index * self.ROW_HEIGHT
+            selected = rows[index] == self.variable.get()
+            if index == self._hover_row:
+                rounded_polygon(canvas, 6, index_y + 3, width - 6,
+                                index_y + self.ROW_HEIGHT - 3, 8,
+                                fill=COLORS["row_selected"], outline="")
+            elif selected:
+                rounded_polygon(canvas, 6, index_y + 3, width - 6,
+                                index_y + self.ROW_HEIGHT - 3, 8,
+                                fill=COLORS["grey_hover"], outline="")
+            color = COLORS["purple_hover"] if selected else COLORS["text"]
+            canvas.create_text(self.padx, index_y + self.ROW_HEIGHT / 2,
+                               text=rows[index], fill=color, anchor="w",
+                               font=self._font_spec)
+            if selected:
+                mark_x = width - 20
+                mark_y = index_y + self.ROW_HEIGHT / 2
+                canvas.create_line(mark_x - 5, mark_y, mark_x - 1, mark_y + 4,
+                                   fill=COLORS["purple"], width=2,
+                                   capstyle="round")
+                canvas.create_line(mark_x - 1, mark_y + 4, mark_x + 5, mark_y - 4,
+                                   fill=COLORS["purple"], width=2,
+                                   capstyle="round")
+
+    def _scroll_offset(self) -> int:
+        """Возвращает номер первой показанной строки."""
+        total = len(self._popup_rows)
+        if total <= self._popup_visible:
+            return 0
+        current = self._popup_rows.index(self.variable.get()) \
+            if self.variable.get() in self._popup_rows else 0
+        if current < self._scroll_top:
+            self._scroll_top = current
+        elif current >= self._scroll_top + self._popup_visible:
+            self._scroll_top = current - self._popup_visible + 1
+        return max(0, min(self._scroll_top, total - self._popup_visible))
+
+    def _row_motion(self, event) -> None:
+        """Подсвечивает строку под курсором."""
+        if self._popup is None:
+            return
+        index = event.y // self.ROW_HEIGHT + self._scroll_offset()
+        if index != self._hover_row:
+            self._hover_row = index
+            self._draw_rows()
+
+    def _clear_row_hover(self) -> None:
+        """Снимает подсветку строки при уходе курсора."""
+        if self._popup is not None and self._hover_row != -1:
+            self._hover_row = -1
+            self._draw_rows()
+
+    def _row_click(self, event) -> None:
+        """Выбирает строку под курсором и закрывает список."""
+        if self._popup is None:
+            return
+        index = event.y // self.ROW_HEIGHT + self._scroll_offset()
+        if 0 <= index < len(self._popup_rows):
+            self.select(self._popup_rows[index])
+        self.close()
+
+    def select(self, value) -> None:
+        """Записывает значение в переменную и сообщает о выборе.
+
+        Генерируется виртуальное событие ``<<ComboboxSelected>>``, чтобы
+        обработчики, написанные для стандартного списка ttk, работали
+        и с этим виджетом.
+
+        Args:
+            value: Выбранное значение списка.
+        """
+        self.variable.set(value)
+        self._draw()
+        if self.command is not None:
+            self.command()
+        self.event_generate("<<ComboboxSelected>>", when="now")
+
+    def close(self) -> None:
+        """Закрывает раскрывающийся список, если он открыт."""
+        popup, self._popup = self._popup, None
+        self._popup_canvas = None
+        self._hover_row = -1
+        self._scroll_top = 0
+        if popup is not None and popup.winfo_exists():
+            popup.destroy()
+
+    def _close_if_lost(self) -> None:
+        """Закрывает список, если фокус ушёл на другое окно."""
+        if self._popup is None:
+            return
+        try:
+            focus = self.focus_displayof()
+        except (KeyError, tk.TclError):
+            return
+        if focus is None or self._popup not in str(focus):
+            self.close()
+
+    def natural_width(self) -> int:
+        """Вычисляет ширину поля по самому длинному значению списка.
+
+        Returns:
+            Требуемая ширина в пикселях с учётом отступов и стрелки.
+        """
+        text = max((self._measure.measure(value)
+                    for value in (self.values or [""])), default=0)
+        return int(text + 2 * self.padx + 46)
+
+    def set_values(self, values) -> None:
+        """Заменяет список доступных значений и пересчитывает ширину.
+
+        Args:
+            values: Новый набор значений.
+        """
+        self.values = list(values)
+        self.configure(width=self.natural_width())
+        self._draw()
+
+    # ------------------------------------------- совместимость с Combobox
+
+    def get(self) -> str:
+        """Возвращает текущее значение списка."""
+        return self.variable.get()
+
+    def set(self, value) -> None:
+        """Записывает значение в переменную без выбора из списка."""
+        self.variable.set(value)
+        self._draw()
+
+    def current(self, index=None):
+        """Возвращает номер выбранного значения или выбирает его по номеру.
+
+        Args:
+            index: Номер значения. Если не задан, возвращается текущий номер.
+
+        Returns:
+            Номер выбранного значения или ``-1``, если его нет в списке.
+        """
+        if index is None:
+            try:
+                return self.values.index(self.variable.get())
+            except ValueError:
+                return -1
+        if 0 <= index < len(self.values):
+            self.select(self.values[index])
+            return index
+        return -1
+
+    def configure(self, **options):
+        """Изменяет параметры списка.
+
+        Args:
+            **options: Поддерживается только ``values``.
+
+        Returns:
+            Результат базового метода настройки виджета.
+        """
+        if "values" in options:
+            self.set_values(options.pop("values"))
+        if options:
+            return super().configure(**options)
+        return {"values": self.values}
+
+    config = configure
+
+    def _on_destroy(self, event) -> None:
+        """Закрывает список при удалении поля из окна."""
+        if event.widget is self:
+            self.close()
+
+
+class ColorSwatch(tk.Canvas):
+    """Кнопка выбора цвета в виде скруглённого образца."""
+
+    WIDTH = 78
+    HEIGHT = 26
+    RADIUS = 8
+
+    def __init__(self, parent, variable, command) -> None:
+        """Создаёт образец и показывает в нём текущий цвет.
+
+        Args:
+            parent: Родительский виджет.
+            variable: Переменная с цветом в формате ``#RRGGBB``.
+            command: Обработчик открытия палитры.
+        """
+        super().__init__(parent, width=self.WIDTH, height=self.HEIGHT,
+                         bg=parent.cget("bg"), highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=0)
+        self.variable = variable
+        self._command = command
+        self._hovered = False
+        self.bind("<Button-1>", self._fire)
+        self.bind("<Enter>", self._hover_on)
+        self.bind("<Leave>", self._hover_off)
+        variable.trace_add("write", lambda *_args: self._draw())
+        self._draw()
+
+    def _fire(self, _event=None) -> None:
+        """Открывает палитру выбора цвета."""
+        self._command()
+
+    def _hover_on(self, _event=None) -> None:
+        """Подсвечивает образец при наведении."""
+        self._hovered = True
+        self._draw()
+
+    def _hover_off(self, _event=None) -> None:
+        """Убирает подсветку образца."""
+        self._hovered = False
+        self._draw()
+
+    def _draw(self) -> None:
+        """Рисует рамку, заливку выбранным цветом и подпись."""
+        self.delete("all")
+        width, height = self.WIDTH, self.HEIGHT
+        value = self.variable.get()
+        if not (isinstance(value, str) and len(value.lstrip("#")) == 6):
+            value = "#FFFFFF"
+        text_color = MainWindow._readable_text(value)
+        outline = COLORS["purple"] if self._hovered else COLORS["grey_border"]
+        rounded_polygon(self, 1, 1, width - 1, height - 1, self.RADIUS,
+                        fill=value, outline=outline, width=1)
+        self.create_text(width / 2, height / 2, text="ЦВЕТ", fill=text_color,
+                         font=FONTS["small"])
+
+
 class CheckBox(tk.Frame):
     """Флажок в стиле макета: скруглённый квадрат с галочкой."""
 
@@ -483,40 +914,76 @@ class CheckBox(tk.Frame):
 
 
 class QualitySlider(tk.Canvas):
-    """Ползунок качества сжатия, отрисованный в стиле макета."""
+    """Ползунок качества сжатия с тонкой дорожкой и круглым бегунком."""
+
+    #: Толщина дорожки в пикселях.
+    TRACK = 6
+    #: Радиус белой части бегунка.
+    THUMB = 8
 
     def __init__(self, parent, variable: tk.IntVar, on_change) -> None:
         """Создаёт ползунок и привязывает его к переменной качества."""
-        super().__init__(parent, height=26, bg=COLORS["card"],
+        super().__init__(parent, height=24, bg=COLORS["card"],
                          highlightthickness=0, cursor="hand2")
         self.variable = variable
         self.on_change = on_change
+        self._hovered = False
+        self._dragging = False
         self.bind("<Configure>", lambda _event: self._draw())
-        self.bind("<Button-1>", self._set_from_pointer)
+        self.bind("<Button-1>", self._press)
         self.bind("<B1-Motion>", self._set_from_pointer)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self._draw()
+
+    def _press(self, event) -> None:
+        """Начинает перетаскивание бегунка."""
+        self._dragging = True
+        self._set_from_pointer(event)
+
+    def _release(self, _event=None) -> None:
+        """Завершает перетаскивание бегунка."""
+        self._dragging = False
+        self._draw()
+
+    def _enter(self, _event=None) -> None:
+        """Увеличивает бегунок при наведении."""
+        self._hovered = True
+        self._draw()
+
+    def _leave(self, _event=None) -> None:
+        """Возвращает обычный размер бегунка."""
+        self._hovered = False
         self._draw()
 
     def _set_from_pointer(self, event) -> None:
         """Вычисляет значение качества по позиции курсора."""
         width = max(self.winfo_width(), 1)
         value = max(1, min(100, round(max(0, min(width, event.x)) / width * 100)))
-        self.variable.set(value)
-        self.on_change(value)
+        if value != self.variable.get():
+            self.variable.set(value)
+            self.on_change(value)
         self._draw()
 
     def _draw(self) -> None:
         """Рисует дорожку, заполненную часть и бегунок."""
         self.delete("all")
         width = max(self.winfo_width(), 100)
-        y = 13
+        y = 12
         value = max(1, min(100, int(self.variable.get())))
         x = width * value / 100
-        self.create_line(0, y, width, y, fill=COLORS["track"], width=10, capstyle="round")
-        draw_gradient_bar(self, 0, x, y, COLORS["progress"], COLORS["purple"])
-        self.create_oval(x - 9, y - 9, x + 9, y + 9, fill=COLORS["purple"],
-                         outline=COLORS["purple"])
-        self.create_oval(x - 6, y - 6, x + 6, y + 6, fill=COLORS["text"],
-                         outline=COLORS["purple"])
+        self.create_line(0, y, width, y, fill=COLORS["track"],
+                         width=self.TRACK, capstyle="round")
+        draw_gradient_bar(self, 0, x, y, COLORS["progress"], COLORS["purple"],
+                          thickness=self.TRACK)
+        radius = self.THUMB + (2 if self._hovered or self._dragging else 0)
+        self.create_oval(x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2,
+                         fill="", outline=COLORS["page"])
+        self.create_oval(x - radius, y - radius, x + radius, y + radius,
+                         fill="#FFFFFF", outline="")
+        self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=COLORS["purple"],
+                         outline="")
 
     def redraw(self) -> None:
         """Обновляет положение бегунка при изменении качества извне."""
@@ -920,10 +1387,15 @@ class MainWindow(BaseWindow):
         self.exif_var = tk.BooleanVar(value=True)
         self.ratio_var = tk.BooleanVar(value=True)
         self.watermark_var = tk.BooleanVar(value=True)
+        self.watermark_type_var = tk.StringVar(
+            value=WATERMARK_TYPE_LABELS["TEXT"])
         self.watermark_text_var = tk.StringVar(value="Мой логотип")
+        self.watermark_image_var = tk.StringVar(value="")
         self.watermark_position_var = tk.StringVar(value=POSITION_LABELS["bottom-right"])
+        self.watermark_color_var = tk.StringVar(value="#FFFFFF")
         self.output_var = tk.StringVar(value="C:\\Processed")
         self.preset_var = tk.StringVar(value="Текущие настройки")
+        self.log_lines: list = []
 
         # Миниатюры кэшируются объектами ImageTk.PhotoImage, которые привязаны к
         # текущему интерпретатору Tk. При создании нового окна старые ссылки
@@ -931,17 +1403,46 @@ class MainWindow(BaseWindow):
         _THUMB_CACHE.clear()
 
         self._build_ui()
+        self._build_menu()
         self._load_presets()
         self._sync_combo(self.position_combo, tuple(POSITION_LABELS.values()))
         self._set_state(STATE_IDLE)
         self.center_window()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
+    def _build_menu(self) -> None:
+        """Создаёт строку меню с пунктом «Помощь» (требование ТЗ 4.3.8)."""
+        bar = tk.Menu(self)
+        help_menu = tk.Menu(bar, tearoff=0)
+        help_menu.add_command(label="О программе", command=self.show_about)
+        help_menu.add_command(label="Руководство пользователя",
+                              command=self.open_user_guide)
+        bar.add_cascade(label="Помощь", menu=help_menu)
+        self.configure(menu=bar)
+        self.menu_bar = bar
+
+    def open_user_guide(self) -> None:
+        """Открывает электронное руководство пользователя (требование ТЗ 4.3.8)."""
+        guide = DOCS_DIR / "ImageBatchStudio_документация.pdf"
+        if guide.exists():
+            os.startfile(str(guide))  # noqa: S606 - открытие собственного файла
+            self.append_log("Открыто руководство пользователя", "info")
+        else:
+            messagebox.showinfo(
+                "Руководство",
+                "Файл руководства не найден:\n"
+                f"{guide}\n\n"
+                "Документация собирается командой:\n"
+                "sphinx-build -b html docs/source docs/_build/html")
+
     def center_window(self) -> None:
         """Открывает окно по центру экрана в пропорциях макета."""
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
         width = min(1371, screen_w - 80)
-        height = min(830, screen_h - 120)
+        # Карточка настроек прокручивается, но кнопку запуска и журнал
+        # выполнения удобнее видеть без прокрутки, поэтому высота окна
+        # подобрана так, чтобы помещалась вся форма.
+        height = min(1000, screen_h - 80)
         x = max(0, (screen_w - width) // 2)
         y = max(0, (screen_h - height) // 2 - 20)
         self.geometry(f"{width}x{height}+{x}+{y}")
@@ -1074,11 +1575,99 @@ class MainWindow(BaseWindow):
 
     # ------------------------------------------------------ правая карточка
 
+    def _on_settings_wheel(self, event) -> None:
+        """Прокручивает карточку настроек колесом мыши над ней."""
+        viewport = getattr(self, "_settings_viewport", None)
+        if viewport is None or not viewport.winfo_exists():
+            return
+        widget = viewport.winfo_containing(event.x_root, event.y_root)
+        current = widget
+        while current is not None and current is not viewport:
+            current = getattr(current, "master", None)
+        if current is None:
+            return
+        viewport.yview_scroll(int(-event.delta / 120) * 3, "units")
+        self._draw_settings_scrollbar()
+
+    def _draw_settings_scrollbar(self) -> None:
+        """Рисует полосу прокрутки поверх холста карточки настроек.
+
+        Полоса рисуется элементами самого холста, а не отдельным
+        виджетом: отдельный виджет запрашивал у Tkinter собственную
+        высоту и отбирал место у списка настроек.
+        """
+        viewport = getattr(self, "_settings_viewport", None)
+        if viewport is None or not viewport.winfo_exists():
+            return
+        viewport.delete("scrollbar")
+        width, height = viewport.winfo_width(), viewport.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        first, last = viewport.yview()
+        if last - first >= 0.999:
+            return
+        track, inset = 6, 2
+        thumb = max(30, int(height * (last - first)))
+        top = int(height * first)
+        viewport.create_rectangle(
+            width - track - inset, top, width - inset, top + thumb,
+            fill=COLORS["purple"], outline="", tags="scrollbar")
+
+    def _on_settings_scroll(self, *_args) -> None:
+        """Обновляет полосу прокрутки при прокрутке колесом."""
+        self.after(10, self._draw_settings_scrollbar)
+
     def _build_settings_card(self, parent) -> tk.Frame:
-        """Строит карточку настроек пресета по макету."""
+        """Строит прокручиваемую карточку настроек пресета по макету.
+
+        Прокрутка нужна из-за количества параметров, заданных техническим
+        заданием: пять режимов масштабирования, девять позиций водяного
+        знака, тип знака, размер и цвет, а также текстовый журнал выполнения.
+        """
         border, card = self._card(parent)
-        inner = tk.Frame(card, bg=COLORS["card"])
-        inner.pack(fill="both", expand=True, padx=24, pady=24)
+
+        # Журнал выполнения закреплён внизу карточки вне прокручиваемой
+        # области, поэтому он виден всегда, при любом количестве полей.
+        # Подпись размещается после блока, чтобы при упаковке вниз она
+        # оказалась над ним.
+        log_frame = RoundedBox(card, COLORS["preview"], COLORS["grey_border"],
+                               background=COLORS["card"], height=92,
+                               radius=12)
+        log_frame.pack(side="bottom", fill="x", padx=24, pady=(0, 20))
+        self.log_text = tk.Text(log_frame, height=4, bg=COLORS["preview"],
+                                fg=COLORS["muted"], font=FONTS["small"],
+                                relief="flat", bd=0, highlightthickness=0,
+                                wrap="word", state="disabled",
+                                insertbackground=COLORS["preview"],
+                                padx=12, pady=8)
+        self.log_text.pack(fill="both", expand=True, padx=2, pady=2)
+        log_frame.embed(self.log_text, padx=2)
+        self._section_label(card, "ЖУРНАЛ ВЫПОЛНЕНИЯ", pady=(0, 6),
+                            side="bottom")
+        self._setup_log_tags()
+
+        viewport = tk.Canvas(card, bg=COLORS["card"], bd=0, highlightthickness=0)
+        viewport.pack(side="top", fill="both", expand=True)
+        inner = tk.Frame(viewport, bg=COLORS["card"])
+        window = viewport.create_window((PAD, PAD), window=inner, anchor="nw")
+        # Внутренний фрейм не упаковывается: его размер задаёт элемент
+        # canvas. Растягивающийся pack сжимает фрейм до текущей области
+        # просмотра, и нижние поля настроек оказываются за её пределами.
+        inner.bind("<Configure>",
+                   lambda _event: (viewport.configure(
+                       scrollregion=viewport.bbox("all")),
+                       self.after_idle(self._draw_settings_scrollbar)))
+
+        def _resize_viewport(event) -> None:
+            """Подгоняет ширину и отступы прокручиваемой области."""
+            viewport.itemconfigure(window, width=max(event.width - 2 * PAD, 1))
+            viewport.coords(window, PAD, PAD)
+            self._draw_settings_scrollbar()
+
+        viewport.bind("<Configure>", _resize_viewport)
+        viewport.bind_all("<MouseWheel>", self._on_settings_wheel, add="+")
+        self._settings_viewport = viewport
+        self._settings_inner = inner
 
         header = tk.Frame(inner, bg=COLORS["card"])
         header.pack(fill="x", pady=(0, 16))
@@ -1098,9 +1687,14 @@ class MainWindow(BaseWindow):
         self._section_label(inner, "РАЗМЕР ИЗОБРАЖЕНИЯ", pady=(14, 8))
         size = tk.Frame(inner, bg=COLORS["card"])
         size.pack(fill="x")
-        self._entry(size, self.width_var).pack(side="left", fill="x", expand=True)
+        self._entry(size, self.width_var).pack(
+            side="left", fill="x", expand=True)
         tk.Frame(size, width=28, bg=COLORS["card"]).pack(side="left")
-        self._entry(size, self.height_var).pack(side="left", fill="x", expand=True)
+        self._entry(size, self.height_var).pack(
+            side="left", fill="x", expand=True)
+        self._hint(inner,
+                   "Ширина и высота в пикселях. Оставьте оба поля пустыми, "
+                   "чтобы не менять размер")
 
         self.ratio_check = CheckBox(inner, self.ratio_var, "Сохранять пропорции")
         self.ratio_check.pack(anchor="w", pady=(8, 14))
@@ -1118,15 +1712,61 @@ class MainWindow(BaseWindow):
                                         "Добавить водяной знак")
         self.watermark_check.pack(anchor="w", pady=(0, 9))
 
-        watermark = tk.Frame(inner, bg=COLORS["card"])
-        watermark.pack(fill="x")
-        self._entry(watermark, self.watermark_text_var).pack(
+        type_row = tk.Frame(inner, bg=COLORS["card"])
+        type_row.pack(fill="x", pady=(0, 8))
+        self.watermark_type_combo = self._combo(
+            type_row, self.watermark_type_var,
+            tuple(WATERMARK_TYPE_LABELS.values()), width=25,
+            side="left", state="readonly")
+        self.watermark_type_combo.bind("<<ComboboxSelected>>",
+                                       self._on_watermark_type)
+        tk.Frame(type_row, width=8, bg=COLORS["card"]).pack(side="left")
+        self.position_combo = self._combo(type_row, self.watermark_position_var,
+                                          tuple(POSITION_LABELS.values()),
+                                          side="right")
+        self.position_combo.configure(width=196)
+
+        # Поля текста и файла логотипа живут в общем контейнере, поэтому
+        # переключение типа знака меняет их содержимое на одном месте,
+        # а не прячет старое поле и не сдвигает всю форму вниз.
+        self.watermark_slot = tk.Frame(inner, bg=COLORS["card"])
+        self.watermark_slot.pack(fill="x", pady=(0, 8))
+
+        self.watermark_text_frame = tk.Frame(self.watermark_slot,
+                                             bg=COLORS["card"])
+        self._entry(self.watermark_text_frame, self.watermark_text_var).pack(
             side="left", fill="x", expand=True)
-        tk.Frame(watermark, width=13, bg=COLORS["card"]).pack(side="left")
-        self.position_combo = self._combo(watermark, self.watermark_position_var,
-                                          tuple(POSITION_LABELS.values()), width=17,
-                                          side="right", expand=True)
-        self.position_combo.master.config(width=191)
+
+        self.watermark_image_frame = tk.Frame(self.watermark_slot,
+                                              bg=COLORS["card"])
+        self._entry(self.watermark_image_frame, self.watermark_image_var).pack(
+            side="left", fill="x", expand=True)
+        tk.Frame(self.watermark_image_frame, width=8, bg=COLORS["card"]).pack(
+            side="left")
+        self._button(self.watermark_image_frame, "Выбрать PNG",
+                     self.choose_watermark_image, accent=True,
+                     font=FONTS["button_small"], pady=10, side="left")
+        self._on_watermark_type()
+
+        look = tk.Frame(inner, bg=COLORS["card"])
+        look.pack(fill="x", pady=(0, 4))
+        # Элементы размещаются так, чтобы растягивающийся ползунок получил
+        # только остаток строки: подпись слева укладывается первой,
+        # элементы справа — до ползунка, иначе он их вытеснит.
+        tk.Label(look, text="РАЗМЕР, %", bg=COLORS["card"], fg=COLORS["section"],
+                 font=FONTS["small"], anchor="w").pack(side="left")
+        self.color_button = ColorSwatch(look, self.watermark_color_var,
+                                        self._choose_watermark_color)
+        self.color_button.pack(side="right", pady=(2, 0))
+        tk.Frame(look, width=12, bg=COLORS["card"]).pack(side="right")
+        self.watermark_size_label = tk.Label(look, text="4%", bg=COLORS["card"],
+                                             fg=COLORS["muted"],
+                                             font=FONTS["small"])
+        self.watermark_size_label.pack(side="right")
+        self.watermark_size_var = tk.IntVar(value=4)
+        self.watermark_size = QualitySlider(look, self.watermark_size_var,
+                                            self._on_watermark_size_change)
+        self.watermark_size.pack(side="left", fill="x", expand=True, padx=(10, 8))
 
         self._section_label(inner, "ПАПКА СОХРАНЕНИЯ", pady=(14, 8))
         output = tk.Frame(inner, bg=COLORS["card"])
@@ -1151,13 +1791,50 @@ class MainWindow(BaseWindow):
         preset_row = tk.Frame(inner, bg=COLORS["card"])
         preset_row.pack(fill="x", pady=(18, 0))
         self.preset_combo = self._combo(preset_row, self.preset_var, (),
-                                        state="normal", height=38, padx_inner=12,
-                                        side="left", expand=True)
-        self.preset_combo.master.config(width=250)
+                                        state="normal", height=38,
+                                        side="left", fill="x")
         self.preset_combo.bind("<<ComboboxSelected>>", self._load_selected_preset)
         self._button(preset_row, "Сохранить", self.save_preset, accent=True,
                      font=FONTS["button_small"], pady=8, side="left")
+        # Нижний отступ, чтобы последний ряд не лип к краю прокрутки.
+        tk.Frame(inner, bg=COLORS["card"], height=8).pack()
         return border
+
+    def _setup_log_tags(self) -> None:
+        """Настраивает цвета строк журнала по типу сообщения."""
+        self.log_text.tag_configure("ok", foreground=COLORS["status_ready"])
+        self.log_text.tag_configure("error", foreground=COLORS["status_error"])
+        self.log_text.tag_configure("info", foreground=COLORS["muted"])
+        self.log_text.tag_configure("head", foreground=COLORS["text"])
+        self.append_log("Программа готова к работе", "head")
+
+    def append_log(self, message: str, kind: str = "info") -> None:
+        """Добавляет строку в текстовый терминал журнала.
+
+        Хранится не более 200 строк, чтобы терминал не разрастался
+        при длительной обработке.
+
+        Args:
+            message: Текст сообщения.
+            kind: Тип строки: ``head``, ``ok``, ``error`` или ``info``.
+        """
+        if not hasattr(self, "log_text"):
+            return
+        self.log_lines.append(message)
+        if len(self.log_lines) > 200:
+            del self.log_lines[:len(self.log_lines) - 200]
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", message.rstrip() + "\n", kind)
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def clear_log(self) -> None:
+        """Очищает текстовый терминал журнала."""
+        self.log_lines.clear()
+        if hasattr(self, "log_text"):
+            self.log_text.config(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.config(state="disabled")
 
     # ------------------------------------------------------------- элементы
 
@@ -1199,27 +1876,59 @@ class MainWindow(BaseWindow):
 
     def _combo(self, parent, variable, values, width=None, state="readonly",
                height=44, padx_inner=30, **pack_options):
-        """Создаёт выпадающий список со скруглённой рамкой."""
-        box = RoundedBox(parent, COLORS["page"], COLORS["grey_border"],
-                         background=parent.cget("bg"), height=height,
-                         focus_border=COLORS["purple"])
-        combo = ttk.Combobox(box, textvariable=variable, values=values,
-                             state=state, width=width or 18, style="App.TCombobox")
-        box.embed(combo, padx=padx_inner)
-        box.pack(fill="x", **pack_options)
+        """Создаёт выпадающий список в едином скруглённом стиле.
+
+        Args:
+            parent: Родительский виджет.
+            variable: Переменная со значением.
+            values: Доступные значения.
+            width: Не используется, ширина задаётся разметкой.
+            state: Режим ``readonly`` или ``normal``.
+            height: Высота закрытого поля.
+            padx_inner: Отступ текста от левого края.
+            **pack_options: Параметры размещения в родителе.
+
+        Returns:
+            Экземпляр :class:`RoundedCombo`.
+        """
+        combo = RoundedCombo(parent, variable, values, background=parent.cget("bg"),
+                             height=height, padx=16, font=FONTS["value"])
+        # В строке список занимает ширину по своему содержимому,
+        # а растягивается только во всю ширину карточки.
+        if pack_options.get("side") in ("left", "right"):
+            combo.pack(**pack_options)
+        else:
+            combo.pack(fill="x", **pack_options)
         return combo
 
-    def _section_label(self, parent, text, pady=(0, 0)):
-        """Добавляет верхнюю подпись раздела настроек."""
+    def _section_label(self, parent, text, pady=(0, 0), side="top"):
+        """Добавляет верхнюю подпись раздела настроек.
+
+        Args:
+            parent: Родительский виджет.
+            text: Текст подписи.
+            pady: Вертикальные отступы вокруг подписи.
+            side: Сторона размещения: ``top`` по умолчанию, ``bottom``
+                закрепляет подпись внизу карточки.
+
+        Returns:
+            Созданная надпись.
+        """
         label = tk.Label(parent, text=text, bg=COLORS["card"], fg=COLORS["section"],
                          font=FONTS["section"], anchor="w")
-        label.pack(fill="x", pady=pady)
+        label.pack(side=side, fill="x", pady=pady)
         return label
 
     def _hint(self, parent, text):
-        """Добавляет вспомогательную подпись под полем формата."""
-        tk.Label(parent, text=text, bg=COLORS["card"], fg=COLORS["muted"],
-                 font=FONTS["small"], anchor="w").pack(fill="x")
+        """Добавляет вспомогательную подпись под полем формы.
+
+        Returns:
+            Созданная надпись, чтобы вызывающий код мог обновлять текст.
+        """
+        label = tk.Label(parent, text=text, bg=COLORS["card"], fg=COLORS["muted"],
+                         font=FONTS["small"], anchor="w")
+        label.pack(fill="x")
+        return label
 
     def _setup_styles(self) -> None:
         """Настраивает оформление стандартных элементов Tkinter под макет."""
@@ -1416,26 +2125,156 @@ class MainWindow(BaseWindow):
 
     # --------------------------------------------------------------- пресеты
 
+    def _resize_from_fields(self) -> tuple:
+        """Определяет режим масштабирования по содержимому полей формы.
+
+        Пользователь задаёт размер привычным образом — числом ширины и
+        числом высоты в пикселях. Режим выводится из того, какие поля
+        заполнены:
+
+        * оба поля пусты — размер не меняется (``NONE``);
+        * заполнена только ширина или только высота — размер по этой
+          стороне, вторая считается по пропорциям;
+        * заполнены оба поля — изображение вписывается в этот
+          габаритный прямоугольник с сохранением пропорций;
+        * в поле ширины указан процент (например ``50%``) — размер
+          изменяется в процентах от исходного.
+
+        Returns:
+            Пара ``(режим, значение)`` для профиля настроек.
+        """
+        width = self.width_var.get().strip()
+        height = self.height_var.get().strip()
+
+        if width.endswith("%"):
+            try:
+                percent = float(width[:-1].strip().replace(",", "."))
+            except ValueError:
+                percent = 0
+            if percent > 0:
+                return "PERCENT", f"{percent:g}"
+
+        if width and height:
+            return "FIT", f"{width}x{height}"
+        if width:
+            return "WIDTH", width
+        if height:
+            return "HEIGHT", height
+        return "NONE", ""
+
+    def _fill_resize_fields(self, preset: Preset) -> None:
+        """Заполняет поля ширины и высоты из сохранённого профиля.
+
+        Args:
+            preset: Профиль настроек, загружаемый в форму.
+        """
+        mode = preset.resize_mode
+        value = (preset.resize_value or "").strip()
+        if mode == "NONE" or not value:
+            self.width_var.set("")
+            self.height_var.set("")
+        elif mode in ("WIDTH", "HEIGHT"):
+            self.width_var.set(value if mode == "WIDTH" else "")
+            self.height_var.set(value if mode == "HEIGHT" else "")
+        elif mode == "PERCENT":
+            self.width_var.set(f"{value.rstrip('%')}%")
+            self.height_var.set("")
+        else:
+            parts = value.lower().replace("х", "x").split("x", 1)
+            self.width_var.set(parts[0].strip())
+            self.height_var.set(parts[1].strip() if len(parts) > 1 else "")
+
     def _build_preset(self) -> Preset:
         """Собирает значения формы в профиль настроек."""
-        width = int(self.width_var.get()) if self.width_var.get().strip() else None
-        height = int(self.height_var.get()) if self.height_var.get().strip() else None
-        name = self.preset_var.get().strip() or "Текущие настройки"
+        resize_mode, resize_value = self._resize_from_fields()
+        watermark_type = next((key for key, label in WATERMARK_TYPE_LABELS.items()
+                               if label == self.watermark_type_var.get()), "TEXT")
         position = next((key for key, label in POSITION_LABELS.items()
-                         if label == self.watermark_position_var.get()), "bottom-right")
+                         if label == self.watermark_position_var.get()),
+                        "bottom-right")
+        # Для графического знака текст не используется, поэтому в профиль
+        # не попадает и не хранится зря.
+        text = ("" if watermark_type == "IMAGE"
+                else self.watermark_text_var.get().strip())
         return Preset(
-            name=name,
+            name=self.preset_var.get().strip() or "Текущие настройки",
             output_format=self.format_var.get(),
-            width=width,
-            height=height,
+            resize_mode=resize_mode,
+            resize_value=resize_value,
             quality=int(self.quality_var.get()),
             clear_exif=self.exif_var.get(),
             keep_ratio=self.ratio_var.get(),
             output_dir=self.output_var.get().strip(),
             watermark_enabled=self.watermark_var.get(),
-            watermark_text=self.watermark_text_var.get().strip(),
+            watermark_type=watermark_type,
+            watermark_text=text,
+            watermark_image=self.watermark_image_var.get().strip(),
             watermark_position=position,
             watermark_opacity=75,
+            watermark_size=int(self.watermark_size_var.get()),
+            watermark_color=self.watermark_color_var.get(),
+        )
+
+    def _on_watermark_type(self, _event=None) -> None:
+        """Показывает поле ввода для выбранного типа водяного знака."""
+        if not hasattr(self, "watermark_slot"):
+            return
+        if self.watermark_type_var.get() == WATERMARK_TYPE_LABELS["IMAGE"]:
+            self.watermark_text_frame.pack_forget()
+            if not self.watermark_image_frame.winfo_manager():
+                self.watermark_image_frame.pack(fill="x")
+        else:
+            self.watermark_image_frame.pack_forget()
+            if not self.watermark_text_frame.winfo_manager():
+                self.watermark_text_frame.pack(fill="x")
+
+    def _on_watermark_size_change(self, value: int) -> None:
+        """Подписывает выбранный размер водяного знака."""
+        self.watermark_size_label.config(text=f"{value}%")
+
+    def choose_watermark_image(self) -> None:
+        """Выбирает файл логотипа с прозрачностью."""
+        path = filedialog.askopenfilename(
+            title="Выберите логотип",
+            filetypes=[("Изображения с прозрачностью", "*.png"),
+                       ("Все изображения", "*.png *.webp *.gif")],
+        )
+        if path:
+            self.watermark_image_var.set(path)
+
+    def _choose_watermark_color(self, _event=None) -> None:
+        """Выбирает цвет текста водяного знака.
+
+        Образец цвета перерисовывается сам по изменению переменной,
+        поэтому здесь достаточно записать новое значение.
+        """
+        from tkinter import colorchooser
+        chosen = colorchooser.askcolor(
+            color=self.watermark_color_var.get(), title="Цвет водяного знака")
+        if chosen and chosen[1]:
+            self.watermark_color_var.set(chosen[1])
+
+    @staticmethod
+    def _readable_text(color: str) -> str:
+        """Подбирает контрастный цвет подписи для выбранного фона."""
+        text = color.lstrip("#")
+        if len(text) != 6:
+            return "#101F33"
+        red, green, blue = (int(text[index:index + 2], 16) for index in (0, 2, 4))
+        luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+        return "#101F33" if luminance > 140 else "#FFFFFF"
+
+    def show_about(self) -> None:
+        """Показывает сведения о программе (меню «Помощь»)."""
+        messagebox.showinfo(
+            "О программе",
+            "Студия пакетной обработки графики\n"
+            "BatchImageStudio, версия 1.0.0\n\n"
+            "Настольное приложение для пакетной обработки изображений:\n"
+            "конвертация в 9 форматов, изменение размера, очистка EXIF,\n"
+            "текстовый и графический водяной знак, профили настроек.\n\n"
+            "Разработчик: студент группы ИСП-34 Исмоилов А. Ш.\n"
+            "Техническое задание по ГОСТ 34.602-2020",
         )
 
     def _load_presets(self) -> None:
@@ -1449,20 +2288,27 @@ class MainWindow(BaseWindow):
         if preset is None:
             return
         self.format_var.set(preset.output_format)
-        self.width_var.set(str(preset.width or ""))
-        self.height_var.set(str(preset.height or ""))
+        self._fill_resize_fields(preset)
         self.quality_var.set(preset.quality)
         self.quality_label.config(text=f"КАЧЕСТВО СЖАТИЯ: {preset.quality}%")
         self.slider.redraw()
         self.exif_var.set(preset.clear_exif)
         self.ratio_var.set(preset.keep_ratio)
         self.watermark_var.set(preset.watermark_enabled)
+        self.watermark_type_var.set(
+            WATERMARK_TYPE_LABELS.get(preset.watermark_type,
+                                      WATERMARK_TYPE_LABELS["TEXT"]))
         self.watermark_text_var.set(preset.watermark_text)
-        positions = tuple(POSITION_LABELS.values())
+        self.watermark_image_var.set(preset.watermark_image)
         self.watermark_position_var.set(
-            POSITION_LABELS.get(preset.watermark_position, POSITION_LABELS["bottom-right"])
-        )
-        self._sync_combo(self.position_combo, positions)
+            POSITION_LABELS.get(preset.watermark_position,
+                                POSITION_LABELS["bottom-right"]))
+        self.watermark_size_var.set(preset.watermark_size)
+        self.watermark_size_label.config(text=f"{preset.watermark_size}%")
+        self.watermark_size.redraw()
+        self.watermark_color_var.set(preset.watermark_color)
+        self._sync_combo(self.position_combo, tuple(POSITION_LABELS.values()))
+        self._on_watermark_type()
         self.output_var.set(preset.output_dir)
 
     def save_preset(self) -> None:
@@ -1501,6 +2347,7 @@ class MainWindow(BaseWindow):
                 self.database.create_preset(preset)
             self.active_session_id = self.database.create_session(preset, len(self.items))
         except (ValueError, sqlite3.Error, OSError) as exc:
+            self.append_log(f"Ошибка параметров: {exc}", "error")
             messagebox.showerror("Проверьте настройки", str(exc))
             return
         for item in self.items:
@@ -1513,6 +2360,31 @@ class MainWindow(BaseWindow):
         self._set_state(STATE_RUNNING)
         self.worker.start()
         self._schedule_worker_events()
+        self.append_log(
+            f"Запуск обработки: {len(self.items)} файл(ов), "
+            f"формат {preset.output_format}, размер "
+            f"{self._describe_resize(preset)}", "head")
+
+    @staticmethod
+    def _describe_resize(preset: Preset) -> str:
+        """Формулирует для журнала понятное описание изменения размера.
+
+        Args:
+            preset: Профиль настроек текущей обработки.
+
+        Returns:
+            Текст для журнала выполнения.
+        """
+        value = (preset.resize_value or "").strip()
+        if preset.resize_mode == "NONE" or not value:
+            return "без изменений"
+        if preset.resize_mode == "PERCENT":
+            return f"{value}% от исходного"
+        if preset.resize_mode == "WIDTH":
+            return f"по ширине {value} px"
+        if preset.resize_mode == "HEIGHT":
+            return f"по высоте {value} px"
+        return f"в габарит {value.replace('x', '×')} px"
 
     def cancel_processing(self) -> None:
         """Запрашивает остановку текущей обработки."""
@@ -1559,6 +2431,11 @@ class MainWindow(BaseWindow):
                 # как только файл обработан, а не оставаться пустым до конца.
                 if event[1] == self.selected_index and event[2].output is not None:
                     self.preview.show(event[2].source, event[2].output)
+                if event[2].status == "Готово":
+                    self.append_log(f"Готово: {event[2].source.name}", "ok")
+                elif event[2].status == "Ошибка":
+                    self.append_log(
+                        f"Ошибка: {event[2].source.name} — {event[2].error}", "error")
                 self._update_progress_display()
             elif event[0] == "progress":
                 self.queue_list.update_row(event[1])
@@ -1607,6 +2484,9 @@ class MainWindow(BaseWindow):
             self.summary_title.config(text="Обработка завершена")
         total = len(self.items)
         self.summary_detail.config(text=f"Обработано: {succeeded} из {total} файлов (100%)")
+        self.append_log(
+            f"Обработка завершена за {duration:.2f} с: успешно {succeeded}, "
+            f"ошибок {failed}, отменено {cancelled}", "head")
         if failed:
             details = "\n".join(
                 f"{item.source.name}: {item.error}" for item in self.items

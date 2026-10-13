@@ -1,6 +1,6 @@
 """Снимок окна готового исполняемого файла.
 
-Запускает dist\\ImageBatchStudio.exe, находит его окно по заголовку и сохраняет
+Запускает dist\\BatchImageStudio.exe, находит его окно по заголовку и сохраняет
 изображение через Win32 PrintWindow. Нужен для подтверждения в отчёте, что
 приложение запускается как один файл, без установленного Python.
 
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.screenshot_ui import capture_hwnd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "dist" / "ImageBatchStudio.exe"
+EXE = ROOT / "dist" / "BatchImageStudio.exe"
 SHOTS = ROOT / "docs" / "screenshots"
 TITLE = "Batch Image Processor"
 
@@ -63,10 +63,11 @@ def seed_demo_preset() -> None:
     manager = DatabaseManager(str(EXE.parent / "data" / "presets.db"))
     manager.delete_preset("Презентация для сайта")
     manager.create_preset(Preset(name="Презентация для сайта", output_format="WebP",
-                                 width=1600, height=900, quality=85,
-                                 clear_exif=True, keep_ratio=True,
+                                 resize_mode="WIDTH", resize_value="1600",
+                                 quality=85, clear_exif=True, keep_ratio=True,
                                  output_dir="C:\\Processed",
                                  watermark_enabled=True,
+                                 watermark_type="TEXT",
                                  watermark_text="СТУДИЯ", watermark_opacity=70))
     manager.close()
 
