@@ -1,0 +1,30 @@
+/* Дополнительное оформление документации в стиле приложения. */
+
+.wy-nav-content {
+    max-width: 1000px;
+}
+
+code.literal {
+    background: #f2f4f8;
+    border: 1px solid #dde3ee;
+    border-radius: 4px;
+    padding: 0 4px;
+    color: #1f3a5f;
+}
+
+table.docutils td,
+table.docutils th {
+    vertical-align: top;
+}
+
+.rst-content table.docutils td {
+    white-space: normal;
+}
+
+.admonition.warning {
+    background: #fff8e6;
+}
+
+.admonition.important {
+    background: #eef4ff;
+}

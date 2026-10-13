@@ -1,0 +1,32 @@
+[01mRunning Sphinx v9.1.0[39;49;00m
+[01mloading translations [en]... [39;49;00mdone
+[01mmaking output directory... [39;49;00mdone
+loading intersphinx inventory 'python' from https://docs.python.org/3/objects.inv ...
+[01mbuilding [mo]: [39;49;00mall of 0 po files
+[01mwriting output... [39;49;00m
+[01mbuilding [html]: [39;49;00mall source files
+[01mupdating environment: [39;49;00m[new config] 11 added, 0 changed, 0 removed
+[2K[01mreading sources... [39;49;00m[  9%] [35mapi[39;49;00m[2K[01mreading sources... [39;49;00m[ 18%] [35marchitecture[39;49;00m[2K[01mreading sources... [39;49;00m[ 27%] [35mbacklog[39;49;00m[2K[01mreading sources... [39;49;00m[ 36%] [35mdeployment[39;49;00m[2K[01mreading sources... [39;49;00m[ 45%] [35mdeveloper_manual[39;49;00m[2K[01mreading sources... [39;49;00m[ 55%] [35mfunctionality[39;49;00m[2K[01mreading sources... [39;49;00m[ 64%] [35mindex[39;49;00m[2K[01mreading sources... [39;49;00m[ 73%] [35mmessages[39;49;00m[2K[01mreading sources... [39;49;00m[ 82%] [35moverview[39;49;00m[2K[01mreading sources... [39;49;00m[ 91%] [35mtesting[39;49;00m[2K[01mreading sources... [39;49;00m[100%] [35muser_manual[39;49;00m
+[01mlooking for now-outdated files... [39;49;00mnone found
+[01mpickling environment... [39;49;00mdone
+[01mchecking consistency... [39;49;00mdone
+[01mpreparing documents... [39;49;00mdone
+[01mcopying assets... [39;49;00m
+[01mcopying static files... [39;49;00m
+Writing evaluated template result to C:\Users\rokin\Downloads\image_batch_studio_day13-14\docs\_build\html\_static\basic.css
+Writing evaluated template result to C:\Users\rokin\Downloads\image_batch_studio_day13-14\docs\_build\html\_static\documentation_options.js
+Writing evaluated template result to C:\Users\rokin\Downloads\image_batch_studio_day13-14\docs\_build\html\_static\language_data.js
+Writing evaluated template result to C:\Users\rokin\Downloads\image_batch_studio_day13-14\docs\_build\html\_static\js\versions.js
+[01mcopying static files: [39;49;00mdone
+[01mcopying extra files... [39;49;00m
+[01mcopying extra files: [39;49;00mdone
+[01mcopying assets: [39;49;00mdone
+[2K[01mwriting output... [39;49;00m[  9%] [32mapi[39;49;00m[2K[01mwriting output... [39;49;00m[ 18%] [32marchitecture[39;49;00m[2K[01mwriting output... [39;49;00m[ 27%] [32mbacklog[39;49;00m[2K[01mwriting output... [39;49;00m[ 36%] [32mdeployment[39;49;00m[2K[01mwriting output... [39;49;00m[ 45%] [32mdeveloper_manual[39;49;00m[2K[01mwriting output... [39;49;00m[ 55%] [32mfunctionality[39;49;00m[2K[01mwriting output... [39;49;00m[ 64%] [32mindex[39;49;00m[2K[01mwriting output... [39;49;00m[ 73%] [32mmessages[39;49;00m[2K[01mwriting output... [39;49;00m[ 82%] [32moverview[39;49;00m[2K[01mwriting output... [39;49;00m[ 91%] [32mtesting[39;49;00m[2K[01mwriting output... [39;49;00m[100%] [32muser_manual[39;49;00m
+[01mgenerating indices... [39;49;00mgenindex py-modindex done
+[2K[01mhighlighting module code... [39;49;00m[ 20%] [94mapp.database[39;49;00m[2K[01mhighlighting module code... [39;49;00m[ 40%] [94mapp.main[39;49;00m[2K[01mhighlighting module code... [39;49;00m[ 60%] [94mapp.models[39;49;00m[2K[01mhighlighting module code... [39;49;00m[ 80%] [94mapp.processor[39;49;00m[2K[01mhighlighting module code... [39;49;00m[100%] [94mapp.worker[39;49;00m
+[01mwriting additional pages... [39;49;00msearch done
+[01mdumping search index in English (code: en)... [39;49;00mdone
+[01mdumping object inventory... [39;49;00mdone
+[01mbuild succeeded.[39;49;00m
+
+The HTML pages are in docs\_build\html.
