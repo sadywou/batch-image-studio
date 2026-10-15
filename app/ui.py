@@ -118,6 +118,12 @@ POSITION_LABELS = {
 #: Внутренние отступы прокручиваемой карточки настроек, в пикселях.
 PAD = 24
 
+#: Допустимый размер водяного знака в процентах меньшей стороны.
+#: Границы совпадают с проверкой в обработчике, поэтому ползунок
+#: физически не может выдать значение, которое затем отклонит обработка.
+WATERMARK_SIZE_MIN = 1
+WATERMARK_SIZE_MAX = 20
+
 WATERMARK_TYPE_LABELS = {
     "TEXT": "Текстовый знак",
     "IMAGE": "Логотип (PNG)",
@@ -323,6 +329,7 @@ class RoundedButton(tk.Canvas):
         self._text = text
         self._icon = icon
         self._padx = padx
+        self._pady = pady
         self._enabled = True
         self._hovered = False
         self._pressed = False
@@ -343,11 +350,15 @@ class RoundedButton(tk.Canvas):
         self._draw()
 
     def _required_size(self):
-        """Вычисляет размер кнопки по тексту и иконке."""
+        """Вычисляет размер кнопки по тексту, иконке и вертикальному полю.
+
+        Высота не может стать меньше 22 пикселей надстрочника, иначе
+        короткие кнопки в строках полей стали бы ниже самих полей.
+        """
         text_width = self._measure.measure(self._text)
         icon_width = 20 if self._icon else 0
         width = text_width + icon_width + 2 * self._padx + 4
-        height = self._measure.metrics("linespace") + 22
+        height = self._measure.metrics("linespace") + max(self._pady + 10, 22)
         return int(width), int(height)
 
     def set_text(self, text) -> None:
@@ -914,19 +925,37 @@ class CheckBox(tk.Frame):
 
 
 class QualitySlider(tk.Canvas):
-    """Ползунок качества сжатия с тонкой дорожкой и круглым бегунком."""
+    """Ползунок числового параметра с тонкой дорожкой и круглым бегунком.
+
+    Используется для качества сжатия (диапазон 1–100) и для размера
+    водяного знака (диапазон 1–20), поэтому границы задаются
+    конструктором.
+    """
 
     #: Толщина дорожки в пикселях.
     TRACK = 6
     #: Радиус белой части бегунка.
     THUMB = 8
 
-    def __init__(self, parent, variable: tk.IntVar, on_change) -> None:
-        """Создаёт ползунок и привязывает его к переменной качества."""
+    def __init__(self, parent, variable: tk.IntVar, on_change,
+                 minimum: int = 1, maximum: int = 100) -> None:
+        """Создаёт ползунок и привязывает его к переменной.
+
+        Args:
+            parent: Родительский виджет.
+            variable: Переменная со значением.
+            on_change: Обработчик изменения значения.
+            minimum: Минимальное значение ползунка.
+            maximum: Максимальное значение ползунка.
+        """
         super().__init__(parent, height=24, bg=COLORS["card"],
                          highlightthickness=0, cursor="hand2")
+        if maximum <= minimum:
+            raise ValueError("Максимум ползунка должен быть больше минимума")
         self.variable = variable
         self.on_change = on_change
+        self.minimum = minimum
+        self.maximum = maximum
         self._hovered = False
         self._dragging = False
         self.bind("<Configure>", lambda _event: self._draw())
@@ -936,6 +965,20 @@ class QualitySlider(tk.Canvas):
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
         self._draw()
+
+    def value_from_position(self, x: int) -> int:
+        """Переводит координату курсора в значение параметра.
+
+        Args:
+            x: Горизонтальная координата внутри виджета.
+
+        Returns:
+            Значение, ограниченное диапазоном ползунка.
+        """
+        width = max(self.winfo_width(), 1)
+        ratio = max(0.0, min(1.0, x / width))
+        span = self.maximum - self.minimum
+        return int(round(self.minimum + ratio * span))
 
     def _press(self, event) -> None:
         """Начинает перетаскивание бегунка."""
@@ -958,9 +1001,8 @@ class QualitySlider(tk.Canvas):
         self._draw()
 
     def _set_from_pointer(self, event) -> None:
-        """Вычисляет значение качества по позиции курсора."""
-        width = max(self.winfo_width(), 1)
-        value = max(1, min(100, round(max(0, min(width, event.x)) / width * 100)))
+        """Вычисляет значение по позиции курсора."""
+        value = self.value_from_position(event.x)
         if value != self.variable.get():
             self.variable.set(value)
             self.on_change(value)
@@ -971,14 +1013,19 @@ class QualitySlider(tk.Canvas):
         self.delete("all")
         width = max(self.winfo_width(), 100)
         y = 12
-        value = max(1, min(100, int(self.variable.get())))
-        x = width * value / 100
+        span = max(self.maximum - self.minimum, 1)
+        current = max(self.minimum,
+                      min(self.maximum, int(self.variable.get())))
+        ratio = (current - self.minimum) / span
+        x = width * ratio
         self.create_line(0, y, width, y, fill=COLORS["track"],
                          width=self.TRACK, capstyle="round")
-        draw_gradient_bar(self, 0, x, y, COLORS["progress"], COLORS["purple"],
-                          thickness=self.TRACK)
+        if ratio > 0:
+            draw_gradient_bar(self, 0, x, y, COLORS["progress"],
+                              COLORS["purple"], thickness=self.TRACK)
         radius = self.THUMB + (2 if self._hovered or self._dragging else 0)
-        self.create_oval(x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2,
+        self.create_oval(x - radius - 2, y - radius - 2,
+                         x + radius + 2, y + radius + 2,
                          fill="", outline=COLORS["page"])
         self.create_oval(x - radius, y - radius, x + radius, y + radius,
                          fill="#FFFFFF", outline="")
@@ -986,7 +1033,7 @@ class QualitySlider(tk.Canvas):
                          outline="")
 
     def redraw(self) -> None:
-        """Обновляет положение бегунка при изменении качества извне."""
+        """Обновляет положение бегунка при изменении значения извне."""
         self._draw()
 
 
@@ -1765,7 +1812,9 @@ class MainWindow(BaseWindow):
         self.watermark_size_label.pack(side="right")
         self.watermark_size_var = tk.IntVar(value=4)
         self.watermark_size = QualitySlider(look, self.watermark_size_var,
-                                            self._on_watermark_size_change)
+                                            self._on_watermark_size_change,
+                                            minimum=WATERMARK_SIZE_MIN,
+                                            maximum=WATERMARK_SIZE_MAX)
         self.watermark_size.pack(side="left", fill="x", expand=True, padx=(10, 8))
 
         self._section_label(inner, "ПАПКА СОХРАНЕНИЯ", pady=(14, 8))
@@ -1790,12 +1839,15 @@ class MainWindow(BaseWindow):
 
         preset_row = tk.Frame(inner, bg=COLORS["card"])
         preset_row.pack(fill="x", pady=(18, 0))
+        # Высота списка приравнена к остальным полям карточки: раньше
+        # он был ниже и выглядел сжатым по сравнению с формой выше.
         self.preset_combo = self._combo(preset_row, self.preset_var, (),
-                                        state="normal", height=38,
+                                        state="normal", height=44,
                                         side="left", fill="x")
         self.preset_combo.bind("<<ComboboxSelected>>", self._load_selected_preset)
+        tk.Frame(preset_row, width=8, bg=COLORS["card"]).pack(side="left")
         self._button(preset_row, "Сохранить", self.save_preset, accent=True,
-                     font=FONTS["button_small"], pady=8, side="left")
+                     font=FONTS["button_small"], pady=19, side="left")
         # Нижний отступ, чтобы последний ряд не лип к краю прокрутки.
         tk.Frame(inner, bg=COLORS["card"], height=8).pack()
         return border
