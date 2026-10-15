@@ -45,6 +45,7 @@ if collect_all_hook is not None:
         hiddenimports += list(pkg_hidden)
 
 icon_file = PROJECT_ROOT / "build_assets" / "app.ico"
+icon_png = PROJECT_ROOT / "build_assets" / "app.png"
 
 a = Analysis(
     # Точка входа — отдельный скрипт с абсолютными импортами: app/main.py
@@ -93,3 +94,14 @@ exe = EXE(
 if sys.platform == "win32":
     # Подробный лог запуска: создаётся рядом с .exe при ошибке.
     exe = exe  # noqa: F841  (одиночный файл, onedir-часть не используется)
+
+# Значок встраивается в сам .exe, но программа также ищет его рядом
+# с собой, чтобы поставить значок в заголовок окна. Поэтому файлы
+# копируются в папку сборки: при запуске из dist\ они доступны сразу,
+# а без них окно просто останется со значком интерпретатора.
+import shutil  # noqa: E402
+
+target_dir = Path(exe.name).resolve().parent
+for asset in (icon_file, icon_png):
+    if asset.exists():
+        shutil.copy2(asset, target_dir / asset.name)

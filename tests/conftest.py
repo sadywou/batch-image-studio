@@ -73,6 +73,10 @@ class _SilentMessageBox:
         self._record("askdirectory", "", None)
         return ""
 
+    def asksaveasfilename(self, **_kwargs):
+        self._record("asksaveasfilename", "", None)
+        return ""
+
 
 def pytest_configure(config):
     """Регистрирует фикстуры, доступные всем наборам тестов интерфейса."""
@@ -94,6 +98,7 @@ def window(tmp_path, monkeypatch):
 
     dialogs = _SilentMessageBox()
     monkeypatch.setattr(ui, "messagebox", dialogs)
+    monkeypatch.setattr(ui, "filedialog", dialogs)
 
     original = ui.DatabaseManager
 

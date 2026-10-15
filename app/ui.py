@@ -1,4 +1,5 @@
 """Графический интерфейс пакетного конвертера на Tkinter."""
+import math
 import os
 import queue
 import sqlite3
@@ -20,6 +21,7 @@ except ImportError:
 
 from PIL import Image, ImageTk
 
+from . import reporting
 from .database import DatabaseManager
 from .models import Preset, QueueItem
 from .processor import ImageProcessor
@@ -88,6 +90,13 @@ COLORS = {
     "dashed": "#3F78C3",
     "status_ready": "#43D6A0",
     "status_error": "#FF6B78",
+    # Дополнительные оттенки для бейджей и разделителей.
+    "saving": "#2FBF71",
+    "saving_dim": "#123528",
+    "growth": "#E0575F",
+    "growth_dim": "#3A1F23",
+    "separator": "#1B2A3F",
+    "tooltip_bg": "#16243B",
 }
 
 FONTS = {
@@ -114,6 +123,15 @@ POSITION_LABELS = {
     "bottom-center": "Нижний центр",
     "bottom-right": "Правый нижний",
 }
+
+#: Заголовок карточки очереди в обычном состоянии и при перетаскивании.
+QUEUE_TITLE = "Очередь файлов для обработки"
+DROP_TITLE = "Отпустите файлы, чтобы добавить их в очередь"
+
+#: Папка со значком приложения: рядом с .exe, иначе рядом с проектом.
+ICON_FILE = (Path(sys.executable).resolve().parent / "app.ico"
+             if getattr(sys, "frozen", False)
+             else Path(__file__).resolve().parent.parent / "build_assets" / "app.ico")
 
 #: Внутренние отступы прокручиваемой карточки настроек, в пикселях.
 PAD = 24
@@ -817,6 +835,249 @@ class RoundedCombo(tk.Canvas):
             self.close()
 
 
+class Tooltip:
+    """Всплывающая подсказка, появляющаяся при наведении на элемент.
+
+    Подсказка показывается не сразу, чтобы не мешать при обычном
+    движении курсора, и исчезает при уходе курсора или нажатии кнопки.
+    """
+
+    #: Задержка перед появлением подсказки, миллисекунды.
+    DELAY = 550
+
+    def __init__(self, widget, text: str, background: str = None) -> None:
+        """Привязывает подсказку к виджету.
+
+        Args:
+            widget: Виджет, при наведении на который показывается текст.
+            text: Текст подсказки.
+            background: Цвет подложки, по умолчанию — тёмный оттенок темы.
+        """
+        self.widget = widget
+        self.text = text
+        self.background = background or COLORS["tooltip_bg"]
+        self._window = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        """Задерживает появление подсказки."""
+        self.cancel()
+        self._after_id = self.widget.after(self.DELAY, self._show)
+
+    def cancel(self) -> None:
+        """Отменяет запланированное появление подсказки."""
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        """Создаёт окно подсказки рядом с виджетом."""
+        self._after_id = None
+        if self._window is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except tk.TclError:
+            return
+        window = tk.Toplevel(self.widget)
+        window.overrideredirect(True)
+        window.configure(bg=self.background)
+        frame = tk.Frame(window, bg=self.background)
+        frame.pack()
+        tk.Label(frame, text=self.text, bg=self.background,
+                 fg=COLORS["text"], font=FONTS["small"],
+                 padx=10, pady=6).pack()
+        # Подсказка не должна выходить за правый край экрана.
+        width = window.winfo_reqwidth()
+        screen = window.winfo_screenwidth()
+        if x + width > screen - 8:
+            x = max(8, screen - width - 8)
+        window.geometry(f"+{x}+{y}")
+        self._window = window
+
+    def _hide(self, _event=None) -> None:
+        """Убирает подсказку и отменяет её отложенный показ."""
+        self.cancel()
+        window, self._window = self._window, None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+
+class CardPulse:
+    """Пульсирующая подсветка рамки карточки, когда над ней перетаскивают файлы.
+
+    Подсветка не накрывает содержимое: рамка карточки просто становится
+    шире и меняет цвет от тёмно-синего к акцентному, повторяясь волной.
+    Наложение поверх карточки закрывало бы очередь и форму настроек
+    ровно в момент, когда ими и пользуются.
+    """
+
+    #: Пауза между кадрами пульсации, миллисекунды.
+    TICK = 70
+
+    #: Полная ширина светящейся рамки в покое и при перетаскивании.
+    BORDER_IDLE = 1
+    BORDER_ACTIVE = 3
+
+    #: Продолжительность одного цикла пульсации, миллисекунды.
+    PERIOD = 1400
+
+    def __init__(self, border, card) -> None:
+        """Запоминает рамку и содержимое карточки для подсветки.
+
+        Args:
+            border: Внешний фрейм-рамка карточки.
+            card: Внутренний фрейм с содержимым.
+        """
+        self.border = border
+        self.card = card
+        self._after_id = None
+        self._phase = 0.0
+        self._active = False
+
+    def start(self) -> None:
+        """Включает подсветку и запускает пульсацию."""
+        if self._active:
+            return
+        self._active = True
+        self._phase = 0.0
+        self.card.pack_configure(padx=self.BORDER_ACTIVE, pady=self.BORDER_ACTIVE)
+        self._paint()
+        self._tick()
+
+    def stop(self) -> None:
+        """Выключает подсветку и останавливает анимацию."""
+        self._active = False
+        if self._after_id is not None:
+            try:
+                self.border.after_cancel(self._after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._after_id = None
+        self.card.pack_configure(padx=self.BORDER_IDLE, pady=self.BORDER_IDLE)
+        self.border.configure(bg=COLORS["card_border"])
+
+    @property
+    def active(self) -> bool:
+        """Сообщает, горит ли подсветка в данный момент."""
+        return self._active
+
+    def _tick(self) -> None:
+        """Продвигает фазу пульсации и планирует следующий кадр."""
+        if not self._active:
+            self._after_id = None
+            return
+        self._phase = (self._phase + self.TICK / float(self.PERIOD)) % 1.0
+        self._paint()
+        self._after_id = self.border.after(self.TICK, self._tick)
+
+    def _paint(self) -> None:
+        """Окрашивает рамку карточки в текущий цвет пульсации."""
+        # Пила треугольная: яркость растёт до середины цикла и гаснет,
+        # поэтому подсветка выглядит живой, а не мигающей.
+        wave = 0.5 - 0.5 * math.cos(self._phase * 2 * math.pi)
+        color = mix_colors(COLORS["card_border"], COLORS["purple"], 0.25 + 0.75 * wave)
+        self.border.configure(bg=color)
+
+
+class PresetCard(tk.Frame):
+    """Карточка сохранённого профиля в боковой панели пресетов."""
+
+    def __init__(self, parent, name: str, summary: str, on_apply,
+                 on_remove) -> None:
+        """Создаёт карточку профиля с названием и кратким составом.
+
+        Args:
+            parent: Родительский виджет панели.
+            name: Название профиля.
+            summary: Краткое описание параметров профиля.
+            on_apply: Обработчик применения профиля.
+            on_remove: Обработчик удаления профиля.
+        """
+        super().__init__(parent, bg=COLORS["card"], bd=0, highlightthickness=1,
+                         highlightbackground=COLORS["row_border"], height=58)
+        self.pack_propagate(False)
+        self._name = name
+        self._selected = False
+        self._hovered = False
+        self.on_apply = on_apply
+        self.on_remove = on_remove
+
+        text = tk.Frame(self, bg=COLORS["card"])
+        text.pack(side="left", fill="both", expand=True, padx=(13, 0))
+        self.title = tk.Label(text, text=name, bg=COLORS["card"], fg=COLORS["text"],
+                              font=FONTS["name"], anchor="w")
+        self.title.pack(fill="x")
+        self.subtitle = tk.Label(text, text=summary, bg=COLORS["card"],
+                                 fg=COLORS["muted"], font=FONTS["small"], anchor="w")
+        self.subtitle.pack(fill="x", pady=(2, 0))
+
+        self.remove = tk.Label(self, text="×", bg=COLORS["card"], fg=COLORS["muted"],
+                               font=("Segoe UI", 12), width=3, cursor="hand2")
+        self.remove.pack(side="right", fill="y")
+
+        for widget in (self, text, self.title, self.subtitle):
+            widget.bind("<Button-1>", self._apply_click)
+            widget.bind("<Enter>", self._hover_on)
+            widget.bind("<Leave>", self._hover_off)
+        self.remove.bind("<Button-1>", self._remove_click)
+
+    @property
+    def preset_name(self) -> str:
+        """Возвращает название профиля, показанное карточкой."""
+        return self._name
+
+    def _apply_click(self, _event=None) -> None:
+        """Применяет профиль по клику на карточку."""
+        self.on_apply(self._name)
+
+    def _remove_click(self, _event=None) -> None:
+        """Удаляет профиль по крестику."""
+        self.on_remove(self._name)
+
+    def set_selected(self, selected: bool) -> None:
+        """Отмечает карточку как активный профиль."""
+        self._selected = selected
+        self._apply_style()
+
+    def _hover_on(self, _event=None) -> None:
+        """Подсвечивает карточку при наведении курсора."""
+        self._hovered = True
+        self._apply_style()
+
+    def _hover_off(self, _event=None) -> None:
+        """Возвращает карточку к спокойному виду."""
+        self._hovered = False
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        """Обновляет цвета карточки по состоянию выделения и наведения."""
+        if self._selected:
+            background, border, foreground = (COLORS["row_selected"],
+                                              COLORS["purple"], COLORS["purple"])
+        elif self._hovered:
+            background, border, foreground = (COLORS["grey_hover"],
+                                              COLORS["purple_border"], COLORS["text"])
+        else:
+            background, border, foreground = COLORS["card"], COLORS["row_border"], COLORS["text"]
+        for widget in (self, self.title, self.subtitle, self.remove):
+            widget.configure(bg=background)
+        self.title.configure(fg=COLORS["text"])
+        self.subtitle.configure(fg=COLORS["muted"] if not self._selected
+                                else mix_colors(background, foreground, 0.75))
+        self.configure(highlightbackground=border)
+
+
 class ColorSwatch(tk.Canvas):
     """Кнопка выбора цвета в виде скруглённого образца."""
 
@@ -1094,9 +1355,17 @@ class QueueRow(tk.Frame):
         self.name = tk.Label(self.info, text="", bg=COLORS["card"], fg=COLORS["text"],
                              font=FONTS["name"], anchor="w")
         self.name.pack(fill="x")
-        self.size = tk.Label(self.info, text="", bg=COLORS["card"], fg=COLORS["muted"],
+        self.meta = tk.Frame(self.info, bg=COLORS["card"])
+        self.meta.pack(fill="x", pady=(3, 0))
+        self.size = tk.Label(self.meta, text="", bg=COLORS["card"], fg=COLORS["muted"],
                              font=FONTS["small"], anchor="w")
-        self.size.pack(fill="x", pady=(3, 0))
+        self.size.pack(side="left")
+        # Бейдж экономии появляется только после обработки: до неё
+        # сравнивать нечего, а пустая метка лишь раздвигает строку.
+        self.saving = tk.Label(self.meta, text="", bg=COLORS["card"],
+                               fg=COLORS["saving"], font=FONTS["small"],
+                               anchor="w")
+        self.saving.pack(side="left", padx=(9, 0))
 
         self.remove = tk.Label(self, text="×", bg=COLORS["card"], fg=COLORS["muted"],
                                font=("Segoe UI", 12), width=3, cursor="hand2")
@@ -1109,7 +1378,9 @@ class QueueRow(tk.Frame):
         self.bind("<Button-1>", self._select)
         self.info.bind("<Button-1>", self._select)
         self.name.bind("<Button-1>", self._select)
+        self.meta.bind("<Button-1>", self._select)
         self.size.bind("<Button-1>", self._select)
+        self.saving.bind("<Button-1>", self._select)
         self.remove.bind("<Button-1>", self._remove_click)
 
     def _select(self, _event=None) -> None:
@@ -1131,9 +1402,37 @@ class QueueRow(tk.Frame):
             self._load_thumb(item.source)
         self.name.config(text=item.source.name)
         self.size.config(text=self._size_text)
+        self._update_saving(item)
         self.status.config(text=self._status_text(item), fg=self._status_color(item))
         self._selected = selected
         self._apply_style()
+
+    def _update_saving(self, item: QueueItem) -> None:
+        """Показывает бейдж экономии размера для обработанного файла.
+
+        Экономия считается только по успешно обработанным файлам: у
+        ошибочных результата нет, и сравнение с нулём дало бы ложные
+        минус сто процентов.
+        """
+        if item.status != "Готово" or item.output is None:
+            self.saving.config(text="")
+            return
+        try:
+            before = item.source.stat().st_size
+            after = item.output.stat().st_size
+        except OSError:
+            self.saving.config(text="")
+            return
+        if before <= 0:
+            self.saving.config(text="")
+            return
+        percent = round((before - after) / before * 100)
+        if percent >= 0:
+            self.saving.config(text=f"−{percent} % размера",
+                               fg=COLORS["saving"])
+        else:
+            self.saving.config(text=f"+{-percent} % размера",
+                               fg=COLORS["growth"])
 
     def _load_thumb(self, path) -> None:
         """Показывает миниатюру файла вместо текстовой заглушки."""
@@ -1153,8 +1452,8 @@ class QueueRow(tk.Frame):
             background, border = COLORS["grey_hover"], COLORS["purple_border"]
         else:
             background, border = COLORS["card"], COLORS["row_border"]
-        for widget in (self, self.info, self.name, self.size, self.status,
-                       self.remove):
+        for widget in (self, self.info, self.meta, self.name, self.size, self.saving,
+                       self.status, self.remove):
             widget.configure(bg=background)
         self.configure(highlightbackground=border)
 
@@ -1426,6 +1725,8 @@ class MainWindow(BaseWindow):
         self._worker_events = queue.Queue()
         self._event_poll_id = None
         self.queue_controls = []
+        self._pulses: dict = {}
+        self._preset_cards: list = []
 
         self.format_var = tk.StringVar(value="WebP")
         self.width_var = tk.StringVar(value="1920")
@@ -1451,15 +1752,49 @@ class MainWindow(BaseWindow):
 
         self._build_ui()
         self._build_menu()
+        self._apply_icon()
         self._load_presets()
         self._sync_combo(self.position_combo, tuple(POSITION_LABELS.values()))
         self._set_state(STATE_IDLE)
         self.center_window()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
+    def _apply_icon(self) -> None:
+        """Устанавливает значок приложения в заголовке окна.
+
+        Значок хранится рядом с программой, а при сборке в исполняемый
+        файл — внутри него. Если значок недоступен, окно остаётся
+        со значком интерпретатора, что не мешает работе.
+        """
+        icon = ICON_FILE
+        if not icon.exists():
+            return
+        # Значок в формате PNG ставится первым: он работает на любой
+        # системе, тогда как bitmap-значок Windows не принимает
+        # размеры, отличные от стандартных, и может отказать целиком.
+        try:
+            photo = tk.PhotoImage(file=str(icon.with_suffix(".png")))
+            self.iconphoto(True, photo)
+            self._icon_photo = photo
+        except (tk.TclError, OSError):
+            pass
+        try:
+            self.iconbitmap(default=str(icon))
+        except (tk.TclError, OSError):
+            return
+
     def _build_menu(self) -> None:
-        """Создаёт строку меню с пунктом «Помощь» (требование ТЗ 4.3.8)."""
+        """Создаёт строку меню с пунктами «Файл» и «Помощь»."""
         bar = tk.Menu(self)
+        file_menu = tk.Menu(bar, tearoff=0)
+        file_menu.add_command(label="Сохранить профиль настроек",
+                              command=self.save_preset)
+        file_menu.add_command(label="Экспорт отчёта в CSV…",
+                              command=self.export_report)
+        file_menu.add_separator()
+        file_menu.add_command(label="Выход", command=self._close)
+        bar.add_cascade(label="Файл", menu=file_menu)
+
         help_menu = tk.Menu(bar, tearoff=0)
         help_menu.add_command(label="О программе", command=self.show_about)
         help_menu.add_command(label="Руководство пользователя",
@@ -1485,7 +1820,10 @@ class MainWindow(BaseWindow):
     def center_window(self) -> None:
         """Открывает окно по центру экрана в пропорциях макета."""
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
-        width = min(1371, screen_w - 80)
+        # Ширина рассчитана на три карточки: очередь, боковую панель
+        # профилей и форму настроек. Панель профилей добавилась к макету,
+        # поэтому окно стало шире прежних 1371 пикселей.
+        width = min(1560, screen_w - 80)
         # Карточка настроек прокручивается, но кнопку запуска и журнал
         # выполнения удобнее видеть без прокрутки, поэтому высота окна
         # подобрана так, чтобы помещалась вся форма.
@@ -1507,63 +1845,171 @@ class MainWindow(BaseWindow):
     # ------------------------------------------------------------------ каркас
 
     def _build_ui(self) -> None:
-        """Собирает две карточки макета: очередь файлов и настройки пресета."""
+        """Собирает три карточки макета: очередь, пресеты и настройки."""
         self._setup_styles()
         root = tk.Frame(self, bg=COLORS["page"])
         root.pack(fill="both", expand=True, padx=21, pady=21)
         root.grid_columnconfigure(0, weight=0)
-        root.grid_columnconfigure(1, weight=1, minsize=440)
+        root.grid_columnconfigure(1, weight=0)
+        root.grid_columnconfigure(2, weight=1, minsize=430)
         root.grid_rowconfigure(0, weight=1)
 
-        self._build_queue_card(root).grid(row=0, column=0, sticky="nsew", padx=(0, 11))
-        self._build_settings_card(root).grid(row=0, column=1, sticky="nsew")
+        self._build_queue_card(root).grid(row=0, column=0, sticky="nsew",
+                                          padx=(0, 11))
+        self._build_preset_card(root).grid(row=0, column=1, sticky="nsew",
+                                           padx=(0, 11))
+        self._build_settings_card(root).grid(row=0, column=2, sticky="nsew")
 
-    def _card(self, parent):
-        """Создаёт карточку с тонкой светло-фиолетовой рамкой."""
+    def _card(self, parent, name: str):
+        """Создаёт карточку с рамкой и подсветкой для перетаскивания файлов."""
         border = tk.Frame(parent, bg=COLORS["card_border"], bd=0)
         card = tk.Frame(border, bg=COLORS["card"], bd=0)
         card.pack(fill="both", expand=True, padx=1, pady=1)
-        self._register_card_drop(border)
+        pulse = CardPulse(border, card)
+        self._pulses[name] = pulse
+        self._register_card_drop(border, name)
         return border, card
 
-    def _register_card_drop(self, widget: tk.Misc) -> None:
+    def _register_card_drop(self, widget: tk.Misc, name: str) -> None:
         """Разрешает принимать перетаскиваемые файлы в любую из карточек."""
-        if DND_AVAILABLE:
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<Drop>>", self._on_drop)
+        if not DND_AVAILABLE:
+            return
+        widget.drop_target_register(DND_FILES)
+        widget.dnd_bind("<<Drop>>", self._on_drop)
+        widget.dnd_bind("<<DropEnter>>", lambda _event: self._drag_over(name))
+        widget.dnd_bind("<<DropMotion>>", lambda _event: self._drag_over(name))
+        widget.dnd_bind("<<DropLeave>>", lambda _event: self._drag_out(name))
+
+    def _drag_over(self, name: str) -> None:
+        """Зажигает подсветку карточки, над которой перетаскивают файлы."""
+        for key, pulse in self._pulses.items():
+            if key == name:
+                pulse.start()
+            else:
+                pulse.stop()
+        title = getattr(self, "queue_title", None)
+        if title is not None:
+            title.config(text=DROP_TITLE if name == "queue" else QUEUE_TITLE)
+
+    def _drag_out(self, name: str) -> None:
+        """Гасит подсветку карточки после ухода перетаскиваемых файлов."""
+        pulse = self._pulses.get(name)
+        if pulse is not None:
+            pulse.stop()
+        title = getattr(self, "queue_title", None)
+        if title is not None and name == "queue":
+            title.config(text=QUEUE_TITLE)
 
     # ------------------------------------------------------ левая карточка
 
     def _build_queue_card(self, parent) -> tk.Frame:
         """Строит карточку очереди файлов с кнопками и рабочей областью."""
-        border, card = self._card(parent)
+        border, card = self._card(parent, "queue")
         inner = tk.Frame(card, bg=COLORS["card"])
         inner.pack(fill="both", expand=True, padx=25, pady=25)
 
-        tk.Label(inner, text="Очередь файлов для обработки", bg=COLORS["card"],
-                 fg=COLORS["text"], font=FONTS["title"], anchor="w").pack(
-                     fill="x", pady=(0, 16))
+        # Заголовок карточки работает подсказкой при перетаскивании:
+        # подсветки рамки достаточно, чтобы заметить, но не хватает,
+        # чтобы понять, что делать дальше.
+        self.queue_title = tk.Label(inner, text=QUEUE_TITLE,
+                                    bg=COLORS["card"], fg=COLORS["text"],
+                                    font=FONTS["title"], anchor="w")
+        self.queue_title.pack(fill="x", pady=(0, 16))
 
         toolbar = tk.Frame(inner, bg=COLORS["card"])
-        toolbar.pack(fill="x", pady=(0, 20))
+        toolbar.pack(fill="x")
 
         add = self._button(toolbar, "+  Добавить файлы", self.add_files, primary=True,
-                           side="left", padx=(0, 14))
+                           side="left", padx=(0, 10),
+                           tip="Выбрать отдельные изображения для обработки")
         folder = self._button(toolbar, "Добавить папку", self.add_folder, accent=True,
-                              font=FONTS["button"], icon=True, side="left", padx=(0, 14))
-        clear = self._button(toolbar, "Очистить", self.clear_queue, side="left")
+                              font=FONTS["button"], icon=True, side="left",
+                              padx=(0, 10),
+                              tip="Добавить сразу все поддерживаемые файлы из папки")
+        clear = self._button(toolbar, "Очистить", self.clear_queue, side="left",
+                             tip="Убрать все файлы из очереди и сбросить состояние")
         self.queue_controls = [add, folder, clear]
+        self._separator(inner, pady=(16, 18))
 
         self.drop_zone = self._build_drop_zone(inner)
         self.queue_list = QueueList(inner, self._on_row_select, self._on_row_remove)
-        self._register_card_drop(self.queue_list.canvas)
+        self._register_card_drop(self.queue_list.canvas, "queue")
         self.preview = Preview(inner)
+        self._separator(inner, pady=(16, 12))
         self.footer = tk.Label(inner, text="После добавления файлов здесь появится очередь и предпросмотр",
                                bg=COLORS["card"], fg=COLORS["muted"],
                                font=FONTS["small"], anchor="w")
-        border.configure(width=862)
+        border.configure(width=600)
         border.propagate(False)
         return border
+
+    # ------------------------------------------------- средняя карточка
+
+    def _build_preset_card(self, parent) -> tk.Frame:
+        """Строит боковую панель сохранённых профилей настроек.
+
+        Панель заменяет выпадающий список: профили видны сразу,
+        каждый показывает формат и размер результата, поэтому применять
+        настройки одним кликом и не нужно открывать список.
+        """
+        border, card = self._card(parent, "presets")
+        inner = tk.Frame(card, bg=COLORS["card"])
+        inner.pack(fill="both", expand=True, padx=18, pady=22)
+
+        tk.Label(inner, text="Профили", bg=COLORS["card"], fg=COLORS["text"],
+                 font=FONTS["title"], anchor="w").pack(fill="x")
+        self._hint(inner, "Нажмите на карточку, чтобы применить профиль")
+
+        header = tk.Frame(inner, bg=COLORS["card"])
+        header.pack(fill="x", pady=(14, 8))
+        tk.Label(header, text="ИМЯ ПРОФИЛЯ", bg=COLORS["card"],
+                 fg=COLORS["section"], font=FONTS["section"], anchor="w").pack()
+        self.preset_name_box = self._entry(header, self.preset_var, width=60)
+        self.preset_name_box.pack(fill="x", pady=(6, 0))
+        self.preset_name_box.child.bind("<Return>", lambda _event: self.save_preset())
+        Tooltip(self.preset_name_box,
+                "Введите имя и нажмите «Сохранить», чтобы создать профиль")
+
+        self._button(header, "Сохранить", self.save_preset, primary=True,
+                     font=FONTS["button_small"], pady=10, fill="x",
+                     frame_pady=(10, 0),
+                     tip="Сохранить текущие настройки под введённым именем")
+        self.delete_preset_button = self._button(
+            header, "Удалить", self.delete_preset, pady=10, fill="x",
+            frame_pady=(8, 0), tip="Удалить выбранный профиль из базы")
+
+        self._separator(inner, pady=(16, 12))
+        tk.Label(inner, text="СОХРАНЁННЫЕ ПРОФИЛИ", bg=COLORS["card"],
+                 fg=COLORS["section"], font=FONTS["section"],
+                 anchor="w").pack(fill="x", pady=(0, 8))
+
+        viewport = tk.Canvas(inner, bg=COLORS["card"], bd=0, highlightthickness=0)
+        viewport.pack(fill="both", expand=True)
+        self.preset_list = tk.Frame(viewport, bg=COLORS["card"])
+        window = viewport.create_window((0, 0), window=self.preset_list, anchor="nw")
+        self.preset_list.bind("<Configure>", lambda _event: viewport.configure(
+            scrollregion=viewport.bbox("all")))
+
+        def _resize(event) -> None:
+            """Подгоняет ширину списка профилей под область просмотра."""
+            viewport.itemconfigure(window, width=max(event.width, 1))
+
+        viewport.bind("<Configure>", _resize)
+        self._preset_viewport = viewport
+        self._preset_cards: list = []
+        border.configure(width=250)
+        border.propagate(False)
+        return border
+
+    def _separator(self, parent, pady=(12, 12)) -> tk.Frame:
+        """Рисует тонкую линию-разделитель между блоками карточки.
+
+        Разделитель даёт глазу границы блоков: без него соседние
+        группы полей сливаются в один сплошной поток элементов.
+        """
+        line = tk.Frame(parent, bg=COLORS["separator"], height=1, bd=0)
+        line.pack(fill="x", pady=pady)
+        return line
 
     def _build_drop_zone(self, parent) -> tk.Canvas:
         """Создаёт пунктирную зону Drag-and-Drop из макета «Начало»."""
@@ -1573,7 +2019,7 @@ class MainWindow(BaseWindow):
         canvas.bind("<Button-1>", lambda _event: self.add_files())
         canvas.bind("<Enter>", self._drop_enter)
         canvas.bind("<Leave>", self._drop_leave)
-        self._register_card_drop(canvas)
+        self._register_card_drop(canvas, "queue")
         return canvas
 
     def _drop_enter(self, _event=None) -> None:
@@ -1671,7 +2117,12 @@ class MainWindow(BaseWindow):
         заданием: пять режимов масштабирования, девять позиций водяного
         знака, тип знака, размер и цвет, а также текстовый журнал выполнения.
         """
-        border, card = self._card(parent)
+        border, card = self._card(parent, "settings")
+
+        # Блок действия закреплён внизу карточки вне прокручиваемой
+        # области: главная кнопка не должна прятаться под журналом и
+        # требовать прокрутки до каждого запуска обработки.
+        self._build_action_block(card)
 
         # Журнал выполнения закреплён внизу карточки вне прокручиваемой
         # области, поэтому он виден всегда, при любом количестве полей.
@@ -1689,6 +2140,8 @@ class MainWindow(BaseWindow):
                                 padx=12, pady=8)
         self.log_text.pack(fill="both", expand=True, padx=2, pady=2)
         log_frame.embed(self.log_text, padx=2)
+        line = tk.Frame(card, bg=COLORS["separator"], height=1, bd=0)
+        line.pack(side="bottom", fill="x", padx=24, pady=(0, 14))
         self._section_label(card, "ЖУРНАЛ ВЫПОЛНЕНИЯ", pady=(0, 6),
                             side="bottom")
         self._setup_log_tags()
@@ -1724,6 +2177,7 @@ class MainWindow(BaseWindow):
         spacer_height = tkfont.Font(font=FONTS["button_small"]).metrics("linespace") + 22
         tk.Frame(header, bg=COLORS["card"], width=1, height=spacer_height).pack(
             side="right")
+        self._separator(inner, pady=(0, 16))
 
         self._section_label(inner, "ЦЕЛЕВОЙ ФОРМАТ")
         self._combo(inner, self.format_var,
@@ -1731,7 +2185,8 @@ class MainWindow(BaseWindow):
                     pady=(8, 5))
         self._hint(inner, "PNG · JPG · WebP · BMP · TIFF · GIF · ICO · HEIC · AVIF")
 
-        self._section_label(inner, "РАЗМЕР ИЗОБРАЖЕНИЯ", pady=(14, 8))
+        self._separator(inner, pady=(16, 14))
+        self._section_label(inner, "РАЗМЕР ИЗОБРАЖЕНИЯ")
         size = tk.Frame(inner, bg=COLORS["card"])
         size.pack(fill="x")
         self._entry(size, self.width_var).pack(
@@ -1754,7 +2209,8 @@ class MainWindow(BaseWindow):
                                    "Удалить скрытые EXIF метаданные")
         self.exif_check.pack(anchor="w")
 
-        self._section_label(inner, "ВОДЯНОЙ ЗНАК", pady=(14, 6))
+        self._separator(inner, pady=(16, 14))
+        self._section_label(inner, "ВОДЯНОЙ ЗНАК", pady=(0, 6))
         self.watermark_check = CheckBox(inner, self.watermark_var,
                                         "Добавить водяной знак")
         self.watermark_check.pack(anchor="w", pady=(0, 9))
@@ -1817,40 +2273,51 @@ class MainWindow(BaseWindow):
                                             maximum=WATERMARK_SIZE_MAX)
         self.watermark_size.pack(side="left", fill="x", expand=True, padx=(10, 8))
 
-        self._section_label(inner, "ПАПКА СОХРАНЕНИЯ", pady=(14, 8))
+        self._separator(inner, pady=(16, 14))
+        self._section_label(inner, "ПАПКА СОХРАНЕНИЯ", pady=(0, 8))
         output = tk.Frame(inner, bg=COLORS["card"])
         output.pack(fill="x")
         self._entry(output, self.output_var).pack(side="left", fill="x", expand=True)
         tk.Frame(output, width=8, bg=COLORS["card"]).pack(side="left")
         self._button(output, "Выбрать", self.choose_output, accent=True,
-                     font=FONTS["button_small"], pady=10, side="left")
+                     font=FONTS["button_small"], pady=10, side="left",
+                     tip="Указать папку, куда сохранять обработанные файлы")
 
-        self.progress_bar = ProgressBar(inner)
-        self.summary_title = tk.Label(inner, text="", bg=COLORS["card"],
-                                      fg=COLORS["progress"], font=FONTS["accent"],
-                                      anchor="w")
-        self.summary_detail = tk.Label(inner, text="", bg=COLORS["card"],
-                                       fg=COLORS["progress"], font=FONTS["small"],
-                                       anchor="w")
-        self.action_button = self._button(inner, "СТАРТ ОБРАБОТКИ",
-                                          self.start_processing, primary=True,
-                                          font=FONTS["action"], pady=13,
-                                          fill="x", frame_pady=(20, 0))
+        self._separator(inner, pady=(20, 16))
 
-        preset_row = tk.Frame(inner, bg=COLORS["card"])
-        preset_row.pack(fill="x", pady=(18, 0))
-        # Высота списка приравнена к остальным полям карточки: раньше
-        # он был ниже и выглядел сжатым по сравнению с формой выше.
-        self.preset_combo = self._combo(preset_row, self.preset_var, (),
-                                        state="normal", height=44,
-                                        side="left", fill="x")
-        self.preset_combo.bind("<<ComboboxSelected>>", self._load_selected_preset)
-        tk.Frame(preset_row, width=8, bg=COLORS["card"]).pack(side="left")
-        self._button(preset_row, "Сохранить", self.save_preset, accent=True,
-                     font=FONTS["button_small"], pady=19, side="left")
         # Нижний отступ, чтобы последний ряд не лип к краю прокрутки.
         tk.Frame(inner, bg=COLORS["card"], height=8).pack()
         return border
+
+    def _build_action_block(self, card) -> None:
+        """Собирает закреплённый внизу блок запуска и выгрузки отчёта.
+
+        Args:
+            card: Внутренний фрейм карточки настроек.
+        """
+        block = tk.Frame(card, bg=COLORS["card"])
+        block.pack(side="bottom", fill="x", padx=24, pady=(0, 20))
+        line = tk.Frame(card, bg=COLORS["separator"], height=1, bd=0)
+        line.pack(side="bottom", fill="x", padx=24, pady=(0, 16))
+
+        self.progress_bar = ProgressBar(block)
+        self.summary_title = tk.Label(block, text="", bg=COLORS["card"],
+                                      fg=COLORS["progress"], font=FONTS["accent"],
+                                      anchor="w")
+        self.summary_title.pack(fill="x", pady=(0, 2))
+        self.summary_detail = tk.Label(block, text="", bg=COLORS["card"],
+                                       fg=COLORS["progress"], font=FONTS["small"],
+                                       anchor="w")
+        self.summary_detail.pack(fill="x")
+
+        self.action_button = self._button(
+            block, "СТАРТ ОБРАБОТКИ", self.start_processing, primary=True,
+            font=FONTS["action"], pady=13, fill="x", frame_pady=(14, 0),
+            tip="Обработать все файлы очереди по текущим настройкам")
+        self.export_button = self._button(
+            block, "Экспорт отчёта в CSV", self.export_report,
+            font=FONTS["button_small"], pady=11, fill="x", frame_pady=(10, 0),
+            tip="Выгрузить журнал сессий и файлов в таблицу для Excel")
 
     def _setup_log_tags(self) -> None:
         """Настраивает цвета строк журнала по типу сообщения."""
@@ -1892,7 +2359,26 @@ class MainWindow(BaseWindow):
 
     def _button(self, parent, text, command, primary=False, accent=False,
                 icon=None, font=None, pady=12, padx=(0, 0), frame_pady=(0, 0),
-                **pack_options):
+                tip=None, **pack_options):
+        """Создаёт скруглённую кнопку и при необходимости подсказку.
+
+        Args:
+            parent: Родительский виджет.
+            text: Надпись на кнопке.
+            command: Обработчик нажатия.
+            primary: Основная кнопка с заливкой акцентным цветом.
+            accent: Кнопка с рамкой акцентного цвета.
+            icon: ``True``, если на кнопке нужен значок папки.
+            font: Шрифт надписи.
+            pady: Внутренний вертикальный отступ.
+            padx: Внешние горизонтальные отступы.
+            frame_pady: Внешние вертикальные отступы.
+            tip: Текст всплывающей подсказки; ``None`` — без подсказки.
+            **pack_options: Параметры размещения ``pack``.
+
+        Returns:
+            Созданная кнопка :class:`RoundedButton`.
+        """
         """Создаёт скруглённую кнопку в одном из трёх стилей макета."""
         if primary:
             fill, foreground, border = COLORS["purple"], "#FFFFFF", COLORS["purple"]
@@ -1912,6 +2398,8 @@ class MainWindow(BaseWindow):
             font=font, padx=18, pady=pady, icon=icon,
         )
         button.pack(padx=padx, pady=frame_pady, **pack_options)
+        if tip:
+            Tooltip(button, tip)
         return button
 
     def _entry(self, parent, variable, width=60):
@@ -2091,6 +2579,10 @@ class MainWindow(BaseWindow):
             paths = self.tk.splitlist(event.data)
         except tk.TclError:
             paths = [event.data]
+        # Подсветку нужно снять сразу: после отпускания файлов событие
+        # ухода курсора может не прийти, и рамка останется горящей.
+        for name in list(self._pulses):
+            self._drag_out(name)
         self._append_paths(paths)
 
     def _append_paths(self, paths) -> None:
@@ -2330,9 +2822,93 @@ class MainWindow(BaseWindow):
         )
 
     def _load_presets(self) -> None:
-        """Заполняет список сохранённых профилей."""
+        """Перестраивает карточки сохранённых профилей в боковой панели."""
+        for card in self._preset_cards:
+            card.destroy()
+        self._preset_cards = []
         names = self.database.list_presets()
-        self.preset_combo.configure(values=names)
+        if not names:
+            tk.Label(self.preset_list,
+                     text="Пока нет сохранённых профилей.\n"
+                          "Настройте параметры слева и нажмите «Сохранить».",
+                     bg=COLORS["card"], fg=COLORS["muted"], font=FONTS["small"],
+                     justify="left", anchor="n").pack(fill="x", pady=(6, 0))
+            return
+        active = self.preset_var.get().strip()
+        for name in names:
+            preset = self.database.get_preset(name)
+            summary = self._preset_summary(preset) if preset else ""
+            card = PresetCard(self.preset_list, name, summary,
+                              self.apply_preset, self._confirm_delete_preset)
+            card.pack(fill="x", pady=(0, 8))
+            card.set_selected(name == active)
+            self._preset_cards.append(card)
+
+    @staticmethod
+    def _preset_summary(preset: Preset) -> str:
+        """Собирает короткую строку с ключевыми параметрами профиля."""
+        parts = [preset.output_format or "—"]
+        if preset.resize_value:
+            parts.append(str(preset.resize_value))
+        parts.append(f"качество {preset.quality}")
+        if preset.watermark_enabled:
+            parts.append("знак")
+        return " · ".join(parts)
+
+    def apply_preset(self, name: str) -> None:
+        """Загружает параметры профиля из карточки боковой панели."""
+        self.preset_var.set(name)
+        self._load_selected_preset()
+        for card in self._preset_cards:
+            card.set_selected(card.preset_name == name)
+        self.append_log(f"Применён профиль «{name}»", "info")
+
+    def delete_preset(self) -> None:
+        """Удаляет профиль, имя которого указано в поле имени."""
+        name = self.preset_var.get().strip()
+        if not name:
+            messagebox.showwarning("Не выбран профиль",
+                                   "Введите имя профиля, который нужно удалить.")
+            return
+        self._confirm_delete_preset(name)
+
+    def _confirm_delete_preset(self, name: str) -> None:
+        """Удаляет профиль после подтверждения пользователя."""
+        if name not in self.database.list_presets():
+            return
+        if not messagebox.askyesno("Удаление профиля",
+                                   f"Удалить профиль «{name}» без возможности "
+                                   f"восстановления?"):
+            return
+        try:
+            self.database.delete_preset(name)
+        except (sqlite3.Error, OSError) as exc:
+            messagebox.showerror("Не удалось удалить профиль", str(exc))
+            return
+        if self.preset_var.get().strip() == name:
+            self.preset_var.set("")
+        self._load_presets()
+        self.append_log(f"Профиль «{name}» удалён", "info")
+
+    def export_report(self) -> None:
+        """Выгружает журнал обработки в файл CSV по запросу пользователя."""
+        target = filedialog.asksaveasfilename(
+            title="Сохранить отчёт",
+            defaultextension=".csv",
+            filetypes=[("Таблица CSV", "*.csv"), ("Все файлы", "*.*")],
+            initialfile=reporting.default_file_name(),
+        )
+        if not target:
+            return
+        try:
+            rows = reporting.export_from_manager(self.database, target)
+        except (sqlite3.Error, OSError) as exc:
+            messagebox.showerror("Не удалось сохранить отчёт", str(exc))
+            self.append_log(f"Ошибка экспорта отчёта: {exc}", "error")
+            return
+        self.append_log(f"Отчёт сохранён: {Path(target).name}, строк — {rows}", "ok")
+        messagebox.showinfo("Отчёт сохранён",
+                            f"В файл записано строк: {rows}.")
 
     def _load_selected_preset(self, _event=None) -> None:
         """Загружает параметры выбранного профиля в форму."""
@@ -2372,8 +2948,10 @@ class MainWindow(BaseWindow):
                 self.database.update_preset(preset)
             else:
                 self.database.create_preset(preset)
-            self._load_presets()
+            # Имя выставляется до перестроения списка: карточки
+            # подсвечивают активный профиль по значению этой переменной.
             self.preset_var.set(preset.name)
+            self._load_presets()
             messagebox.showinfo("Профиль сохранён", f"Настройки «{preset.name}» сохранены.")
         except (ValueError, sqlite3.Error, OSError) as exc:
             messagebox.showerror("Не удалось сохранить профиль", str(exc))
